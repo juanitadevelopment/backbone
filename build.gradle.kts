@@ -13,17 +13,17 @@ java {
 }
 
 repositories {
-    // shazo 0.1.0 is resolved from the local Maven repository. Install it with
-    // `./gradlew publishToMavenLocal` in the shazo project, or publish it to a
-    // shared repository / JitPack and adjust the dependency coordinates below.
-    mavenLocal()
+    // shazo is consumed from JitPack, which builds it on demand from its GitHub
+    // tag. For offline/local development you can instead `publishToMavenLocal`
+    // in the shazo project and add `mavenLocal()` here.
+    maven { url = uri("https://jitpack.io") }
     mavenCentral()
 }
 
 dependencies {
     // Backbone's public API exposes shazo types (repositories, describers,
     // unit-of-work), so shazo is an `api` dependency.
-    api("net.teppan:shazo:0.1.0")
+    api("com.github.juanitadevelopment:shazo:v0.1.1")
 
     implementation("org.slf4j:slf4j-api:2.0.11")
 

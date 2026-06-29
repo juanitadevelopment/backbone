@@ -14,7 +14,7 @@ container, dynamic proxies, or XML.
 ## Requirements
 
 - **Java 25+**
-- **shazo `0.1.0`** on the build's Maven repositories (see [Getting shazo](#getting-shazo))
+- **shazo `0.1.1`** — resolved automatically from JitPack (see [Getting shazo](#getting-shazo))
 
 ## What it gives you
 
@@ -79,17 +79,28 @@ Each job runs as a `Principal.system()` unit of work; jobs can be
 
 ## Getting shazo
 
-Backbone depends on `net.teppan:shazo:0.1.0`. Until shazo is published to a
-shared repository, install it locally from the shazo project:
+Backbone depends on shazo, resolved from [JitPack](https://jitpack.io) — no
+manual install needed. The build already declares:
 
-```sh
-git clone https://github.com/juanitadevelopment/shazo
-cd shazo && ./gradlew publishToMavenLocal
+```kotlin
+repositories { maven { url = uri("https://jitpack.io") } }
+dependencies { api("com.github.juanitadevelopment:shazo:v0.1.1") }
 ```
 
-Alternatively resolve it from [JitPack](https://jitpack.io) by adding the
-JitPack repository and using the coordinates
-`com.github.juanitadevelopment:shazo:v0.1.0`.
+For offline development you can instead build shazo locally
+(`./gradlew publishToMavenLocal` in the shazo project) and add `mavenLocal()`
+with the `net.teppan:shazo:0.1.1` coordinate.
+
+## Using backbone as a dependency
+
+Backbone is itself published via JitPack:
+
+```kotlin
+repositories { maven { url = uri("https://jitpack.io") } }
+dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.0") }
+```
+
+JitPack builds shazo transitively, so a single dependency is enough.
 
 ## Build
 

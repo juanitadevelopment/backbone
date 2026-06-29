@@ -1,0 +1,8 @@
+# JitPack build configuration.
+# JitPack runs Gradle on this JDK; the build's Java 25 toolchain is then
+# auto-provisioned by the foojay resolver configured in settings.gradle.kts.
+# The shazo dependency is itself built by JitPack on demand.
+jdk:
+  - openjdk21
+install:
+  - ./gradlew publishToMavenLocal -x test --no-daemon
