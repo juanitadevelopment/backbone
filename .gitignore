@@ -1,0 +1,19 @@
+# Gradle
+.gradle/
+build/
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# macOS
+.DS_Store
+
+# H2 database files (runtime)
+*.mv.db
+*.trace.db
+
+# Claude Code session data
+.claude/
