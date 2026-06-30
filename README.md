@@ -9,7 +9,7 @@ work per request, composable services, domain events delivered *after* commit,
 scheduled jobs, and basic runtime introspection — without a heavyweight
 container, dynamic proxies, or XML.
 
-> **Status:** early release (`0.1.2`). API may still change before `1.0.0`.
+> **Status:** early release (`0.1.3`). API may still change before `1.0.0`.
 
 ## Requirements
 
@@ -26,6 +26,7 @@ container, dynamic proxies, or XML.
 | Identity | `Principal` | Immutable id + roles; `anonymous()` / `system()` |
 | Domain events | `ServiceRunner.subscribe` + `Outbox` | In-process or durable (transactional outbox), delivered after commit |
 | Scheduling | `TimerScheduler`, `CronExpression` | Interval and 6-field cron jobs as system units of work |
+| Operations | `BackboneConsole` | One surface to view and control the runner and scheduler at run time |
 
 ## Core idea: a service is a transaction
 
@@ -97,6 +98,33 @@ try (var scheduler = TimerScheduler.builder().dataSource(dataSource).build()) {
 Each job runs as a `Principal.system()` unit of work; jobs can be
 `suspend`/`resume`/`cancel`led and inspected via `jobStatuses()`.
 
+## Operations console
+
+A backbone is assembled from independent parts; `BackboneConsole` binds them into
+one operational surface, so a CLI, an admin HTTP endpoint, or JMX can see and
+control the live system from a single object.
+
+```java
+var console = BackboneConsole.builder()
+        .serviceRunner(runner)
+        .scheduler(scheduler)        // optional
+        .build();
+
+ConsoleSnapshot s = console.snapshot();   // services, outbox counts, job statuses
+
+// Outbox triage
+console.deadLetters(50);                   // inspect stuck events
+console.retryAllDeadLetters();             // requeue them after a fix
+
+// Job control
+console.suspendAllJobs();                  // e.g. before maintenance
+console.resumeAllJobs();
+console.suspendJob("nightly");
+```
+
+The console is a typed API and holds no resources of its own; it does not own
+the runner or scheduler, so closing those remains the caller's responsibility.
+
 ## Getting shazo
 
 Backbone depends on shazo, resolved from [JitPack](https://jitpack.io) — no
@@ -117,7 +145,7 @@ Backbone is itself published via JitPack:
 
 ```kotlin
 repositories { maven { url = uri("https://jitpack.io") } }
-dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.2") }
+dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.3") }
 ```
 
 JitPack builds shazo transitively, so a single dependency is enough.
