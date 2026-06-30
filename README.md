@@ -9,12 +9,12 @@ work per request, composable services, domain events delivered *after* commit,
 scheduled jobs, and basic runtime introspection — without a heavyweight
 container, dynamic proxies, or XML.
 
-> **Status:** early release (`0.1.8`). API may still change before `1.0.0`.
+> **Status:** early release (`0.1.9`). API may still change before `1.0.0`.
 
 ## Requirements
 
-- **Java 25+**
-- **shazo `0.1.5`** — resolved automatically from JitPack (see [Getting shazo](#getting-shazo))
+- **Java 21+**
+- **shazo `0.1.6`** — resolved automatically from JitPack (see [Getting shazo](#getting-shazo))
 
 ## What it gives you
 
@@ -61,8 +61,8 @@ backs each type is configured once, in the wiring. No JDBC types leak into servi
 - **Events after commit** — published events reach subscribers only once the
   transaction commits; a failure rolls everything back and discards them.
 - **Nested composition** — `ctx.call(otherService)` joins the same transaction.
-- **Multitenancy** — configure `tenantRouter(tenant -> dataSource)` and pass a
-  tenant to `execute` / `run`.
+- **Multitenancy** — `tenantRouter(tenant -> dataSource)` plus `forTenant(...)` /
+  `withTenant(...)` (see [Multi-tenancy](#multi-tenancy)).
 
 ### The describer registry (storage in the wiring, not in services)
 
@@ -117,6 +117,47 @@ runner.discardEvent(id);              // drop permanently
 
 `pendingEvents(int)` lists events still awaiting delivery the same way.
 
+## Multi-tenancy
+
+Configure how a tenant maps to a data source, then bind the tenant **once** —
+never on every call:
+
+```java
+var runner = ServiceRunner.builder()
+        .tenantRouter(tenant -> dataSourceFor(tenant))   // tenant -> DataSource
+        .describers(describers)
+        .durableEvents(OrderPlaced.class)
+        .register("placeOrder", ctx -> { ctx.store(order); return order.id(); })
+        .build();
+
+// bind once, reuse — routes to acme's data source (and its own outbox)
+var acme = runner.forTenant("acme");
+acme.execute("placeOrder", principal);
+acme.execute("ship", principal);
+
+// or establish an ambient tenant for a request boundary (e.g. a web filter):
+runner.withTenant("acme", () -> {
+    runner.execute("placeOrder", principal);   // picks up "acme" implicitly
+    return null;
+});
+```
+
+Inside a service, `ctx.tenant()` reports the current tenant. Durable events are
+**per tenant**: each tenant's events are written to and polled from that tenant's
+own data source (its own `backbone_outbox`).
+
+The mapping itself is your choice, all behind the same `tenant -> DataSource` seam:
+
+| Strategy | How `tenantRouter` returns the data source |
+|---|---|
+| **database-per-tenant** | a distinct `DataSource` per tenant (no wrapper) |
+| **schema-per-tenant** | `new SessionInitDataSource(shared, "SET SCHEMA " + tenant)` |
+| **row-level security** | `new SessionInitDataSource(shared, "SET app.current_tenant = '" + tenant + "'")` — the database's RLS policies enforce isolation |
+
+[`SessionInitDataSource`](https://github.com/juanitadevelopment/shazo) is from
+shazo. The same application code runs unchanged across strategies — e.g. schema
+isolation on H2 in tests, PostgreSQL RLS in production.
+
 ## Scheduling
 
 ```java
@@ -169,12 +210,12 @@ manual install needed. The build already declares:
 
 ```kotlin
 repositories { maven { url = uri("https://jitpack.io") } }
-dependencies { api("com.github.juanitadevelopment:shazo:v0.1.5") }
+dependencies { api("com.github.juanitadevelopment:shazo:v0.1.6") }
 ```
 
 For offline development you can instead build shazo locally
 (`./gradlew publishToMavenLocal` in the shazo project) and add `mavenLocal()`
-with the `net.teppan:shazo:0.1.5` coordinate.
+with the `net.teppan:shazo:0.1.6` coordinate.
 
 ## Using backbone as a dependency
 
@@ -182,7 +223,7 @@ Backbone is itself published via JitPack:
 
 ```kotlin
 repositories { maven { url = uri("https://jitpack.io") } }
-dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.8") }
+dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.9") }
 ```
 
 JitPack builds shazo transitively, so a single dependency is enough.

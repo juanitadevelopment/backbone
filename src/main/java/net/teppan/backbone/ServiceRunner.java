@@ -72,31 +72,40 @@ public final class ServiceRunner implements AutoCloseable {
     private final Map<String, AppService<?>> services;
     private final List<Subscription<?>> subscriptions;
     private final ConcurrentHashMap<String, Transactor> transactors = new ConcurrentHashMap<>();
-    private final Outbox outbox;  // null when events are delivered in-process
     private final Repositories describers;  // null when no registry configured
+
+    // Durable events: one Outbox per tenant (each on that tenant's DataSource),
+    // created lazily on first use. Empty types = events delivered in-process.
+    private final boolean durableEnabled;
+    private final List<Class<?>> outboxTypes;
+    private final Duration outboxPollInterval;
+    private final Duration outboxRetention;
+    private final int outboxMaxAttempts;
+    private final ConcurrentHashMap<String, DataSource> dataSources = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Outbox> outboxes = new ConcurrentHashMap<>();
+
+    // Ambient tenant for withTenant(...) scopes. ThreadLocal today; can become a
+    // ScopedValue once the baseline moves to JDK 25 — the public API is unchanged.
+    private final ThreadLocal<String> ambientTenant = new ThreadLocal<>();
 
     private record Subscription<E>(Class<E> type, Consumer<E> listener) {}
 
     private ServiceRunner(Function<String, DataSource> router, Locale defaultLocale,
                           Map<String, AppService<?>> services,
                           List<Subscription<?>> subscriptions,
-                          DataSource outboxDataSource, List<Class<?>> outboxTypes,
+                          List<Class<?>> outboxTypes,
                           Duration pollInterval, Duration retention, int maxAttempts,
                           Repositories describers) {
-        this.router        = router;
-        this.defaultLocale = defaultLocale;
-        this.services      = Map.copyOf(services);
-        this.subscriptions = List.copyOf(subscriptions);
-        this.describers    = describers;
-        if (outboxTypes.isEmpty()) {
-            this.outbox = null;
-        } else {
-            if (outboxDataSource == null) {
-                throw new IllegalStateException("durableEvents requires a dataSource(...)");
-            }
-            this.outbox = new Outbox(outboxDataSource, this::deliver,
-                outboxTypes, pollInterval, retention, maxAttempts);
-        }
+        this.router             = router;
+        this.defaultLocale      = defaultLocale;
+        this.services           = Map.copyOf(services);
+        this.subscriptions      = List.copyOf(subscriptions);
+        this.describers         = describers;
+        this.durableEnabled     = !outboxTypes.isEmpty();
+        this.outboxTypes        = List.copyOf(outboxTypes);
+        this.outboxPollInterval = pollInterval;
+        this.outboxRetention    = retention;
+        this.outboxMaxAttempts  = maxAttempts;
     }
 
     /**
@@ -121,7 +130,7 @@ public final class ServiceRunner implements AutoCloseable {
      * @throws IllegalArgumentException if {@code name} is not registered
      */
     public <R> R execute(String name, Principal principal) throws AppServiceException {
-        return execute(name, principal, null, defaultLocale);
+        return execute(name, principal, ambientTenant.get(), defaultLocale);
     }
 
     /**
@@ -174,7 +183,7 @@ public final class ServiceRunner implements AutoCloseable {
      * @throws AppServiceException if the service or a post-commit action fails
      */
     public <R> R run(AppService<R> service, Principal principal) throws AppServiceException {
-        return run(service, principal, null, defaultLocale);
+        return run(service, principal, ambientTenant.get(), defaultLocale);
     }
 
     /**
@@ -209,6 +218,8 @@ public final class ServiceRunner implements AutoCloseable {
         Objects.requireNonNull(principal, "principal");
         Objects.requireNonNull(locale,    "locale");
 
+        // Resolve this tenant's outbox up front (creates its table + poller once).
+        var outbox = outboxFor(tenant);
         var ctxRef = new AtomicReference<AppContext>();
         R result;
         try {
@@ -218,7 +229,7 @@ public final class ServiceRunner implements AutoCloseable {
                 try {
                     R r = service.execute(ctx);
                     if (outbox != null) {
-                        // Persist events in the same transaction as the change.
+                        // Persist events in the same transaction (this tenant's DB).
                         outbox.write(uow.connection(), ctx.pendingEvents());
                     }
                     return r;
@@ -244,6 +255,152 @@ public final class ServiceRunner implements AutoCloseable {
         return result;
     }
 
+    // ── Tenant binding ─────────────────────────────────────────────────────────
+
+    /**
+     * Returns a view of this runner bound to {@code tenant}: its {@code execute} /
+     * {@code run} calls route to that tenant's data source (and its own outbox)
+     * without repeating the tenant on every call. Bind once, reuse.
+     *
+     * <pre>{@code
+     * var acme = runner.forTenant("acme");
+     * acme.execute("placeOrder", principal);
+     * acme.execute("ship", principal);
+     * }</pre>
+     *
+     * @param tenant the tenant to bind; never {@code null}
+     * @return a tenant-bound runner view
+     */
+    public TenantRunner forTenant(String tenant) {
+        return new TenantRunner(this, Objects.requireNonNull(tenant, "tenant"));
+    }
+
+    /**
+     * Runs {@code action} with {@code tenant} established as the ambient tenant,
+     * so any {@link #execute(String, Principal)} / {@link #run(AppService, Principal)}
+     * call made within (across however many layers) routes to that tenant without
+     * passing it explicitly. Intended for a request boundary (e.g. a web filter).
+     *
+     * <p>The binding is restored on exit, even on exception. Nested
+     * {@code withTenant} calls override for their own scope.
+     *
+     * @param tenant the tenant for the scope; never {@code null}
+     * @param action the work to run; never {@code null}
+     * @param <R>    the result type
+     * @return the action's result
+     * @throws AppServiceException if the action throws it
+     */
+    public <R> R withTenant(String tenant, TenantScope<R> action) throws AppServiceException {
+        Objects.requireNonNull(tenant, "tenant");
+        Objects.requireNonNull(action, "action");
+        String previous = ambientTenant.get();
+        ambientTenant.set(tenant);
+        try {
+            return action.run();
+        } finally {
+            if (previous == null) ambientTenant.remove();
+            else ambientTenant.set(previous);
+        }
+    }
+
+    /** Work run within a {@link #withTenant} scope. */
+    @FunctionalInterface
+    public interface TenantScope<R> {
+        /**
+         * Runs the scoped work.
+         *
+         * @return the result
+         * @throws AppServiceException if the work fails
+         */
+        R run() throws AppServiceException;
+    }
+
+    /**
+     * A view of a {@link ServiceRunner} bound to one tenant. Obtained from
+     * {@link ServiceRunner#forTenant(String)}; its {@code execute} / {@code run}
+     * route to the bound tenant.
+     */
+    public static final class TenantRunner {
+
+        private final ServiceRunner runner;
+        private final String tenant;
+
+        private TenantRunner(ServiceRunner runner, String tenant) {
+            this.runner = runner;
+            this.tenant = tenant;
+        }
+
+        /** The tenant this view is bound to. @return the tenant; never {@code null} */
+        public String tenant() {
+            return tenant;
+        }
+
+        /**
+         * Executes a registered service for this tenant using the default locale.
+         *
+         * @param name      the service name; never {@code null}
+         * @param principal the authenticated caller; never {@code null}
+         * @param <R>       the service return type
+         * @return the service result
+         * @throws AppServiceException if the service or a post-commit action fails
+         */
+        public <R> R execute(String name, Principal principal) throws AppServiceException {
+            return runner.execute(name, principal, tenant, runner.defaultLocale);
+        }
+
+        /**
+         * Executes a registered service for this tenant with an explicit locale.
+         *
+         * @param name      the service name; never {@code null}
+         * @param principal the authenticated caller; never {@code null}
+         * @param locale    the request locale; never {@code null}
+         * @param <R>       the service return type
+         * @return the service result
+         * @throws AppServiceException if the service or a post-commit action fails
+         */
+        public <R> R execute(String name, Principal principal, Locale locale)
+                throws AppServiceException {
+            return runner.execute(name, principal, tenant, locale);
+        }
+
+        /**
+         * Runs an ad-hoc service for this tenant using the default locale.
+         *
+         * @param service   the service; never {@code null}
+         * @param principal the authenticated caller; never {@code null}
+         * @param <R>       the service return type
+         * @return the service result
+         * @throws AppServiceException if the service or a post-commit action fails
+         */
+        public <R> R run(AppService<R> service, Principal principal) throws AppServiceException {
+            return runner.run(service, principal, tenant, runner.defaultLocale);
+        }
+
+        /**
+         * Returns the number of durable events awaiting delivery in this tenant's
+         * outbox, or empty if durable events are not enabled.
+         *
+         * @return the pending count, or empty
+         */
+        public java.util.OptionalLong pendingEventCount() {
+            var ob = runner.outboxFor(tenant);
+            return ob == null ? java.util.OptionalLong.empty()
+                : java.util.OptionalLong.of(ob.pendingCount());
+        }
+
+        /**
+         * Returns the number of dead-lettered durable events in this tenant's
+         * outbox, or empty if durable events are not enabled.
+         *
+         * @return the dead-letter count, or empty
+         */
+        public java.util.OptionalLong deadLetterCount() {
+            var ob = runner.outboxFor(tenant);
+            return ob == null ? java.util.OptionalLong.empty()
+                : java.util.OptionalLong.of(ob.deadLetterCount());
+        }
+    }
+
     // ── Nested (same-transaction) invocation — used by AppContext.call ─────────
 
     <R> R callNested(AppContext ctx, AppService<R> service) throws AppServiceException {
@@ -258,9 +415,7 @@ public final class ServiceRunner implements AutoCloseable {
 
     @Override
     public void close() {
-        if (outbox != null) {
-            outbox.close();
-        }
+        outboxes.values().forEach(Outbox::close);
     }
 
     // ── Introspection (management surface) ─────────────────────────────────────
@@ -281,9 +436,9 @@ public final class ServiceRunner implements AutoCloseable {
      * @return the pending event count, or empty if events are delivered in-process
      */
     public java.util.OptionalLong pendingEventCount() {
-        return outbox == null
+        return !durableEnabled
             ? java.util.OptionalLong.empty()
-            : java.util.OptionalLong.of(outbox.pendingCount());
+            : java.util.OptionalLong.of(defaultOutbox().pendingCount());
     }
 
     /**
@@ -294,9 +449,9 @@ public final class ServiceRunner implements AutoCloseable {
      * @return the dead-letter count, or empty if events are delivered in-process
      */
     public java.util.OptionalLong deadLetterCount() {
-        return outbox == null
+        return !durableEnabled
             ? java.util.OptionalLong.empty()
-            : java.util.OptionalLong.of(outbox.deadLetterCount());
+            : java.util.OptionalLong.of(defaultOutbox().deadLetterCount());
     }
 
     /**
@@ -307,7 +462,7 @@ public final class ServiceRunner implements AutoCloseable {
      * @return the pending entries (metadata only)
      */
     public List<OutboxEntry> pendingEvents(int limit) {
-        return outbox == null ? List.of() : outbox.peekPending(limit);
+        return !durableEnabled ? List.of() : defaultOutbox().peekPending(limit);
     }
 
     /**
@@ -318,7 +473,7 @@ public final class ServiceRunner implements AutoCloseable {
      * @return the dead-lettered entries (metadata only)
      */
     public List<OutboxEntry> deadLetterEvents(int limit) {
-        return outbox == null ? List.of() : outbox.peekDeadLetters(limit);
+        return !durableEnabled ? List.of() : defaultOutbox().peekDeadLetters(limit);
     }
 
     /**
@@ -330,7 +485,7 @@ public final class ServiceRunner implements AutoCloseable {
      *         if none matched or durable events are not enabled
      */
     public boolean retryEvent(long id) {
-        return outbox != null && outbox.retry(id);
+        return durableEnabled && defaultOutbox().retry(id);
     }
 
     /**
@@ -342,7 +497,7 @@ public final class ServiceRunner implements AutoCloseable {
      *         matched or durable events are not enabled
      */
     public boolean discardEvent(long id) {
-        return outbox != null && outbox.discard(id);
+        return durableEnabled && defaultOutbox().discard(id);
     }
 
     // ── Internals ─────────────────────────────────────────────────────────────
@@ -352,15 +507,40 @@ public final class ServiceRunner implements AutoCloseable {
         return describers;
     }
 
-    private Transactor transactorFor(String tenant) {
-        String key = (tenant == null) ? "" : tenant;
-        return transactors.computeIfAbsent(key, k -> {
+    private static String tenantKey(String tenant) {
+        return tenant == null ? "" : tenant;
+    }
+
+    private DataSource dataSourceFor(String tenant) {
+        return dataSources.computeIfAbsent(tenantKey(tenant), k -> {
             DataSource ds = router.apply(tenant);
             if (ds == null) {
                 throw new IllegalStateException("No data source for tenant: " + tenant);
             }
-            return new Transactor(ds);
+            return ds;
         });
+    }
+
+    private Transactor transactorFor(String tenant) {
+        return transactors.computeIfAbsent(tenantKey(tenant),
+            k -> new Transactor(dataSourceFor(tenant)));
+    }
+
+    /**
+     * The Outbox for {@code tenant} — one per tenant, each on that tenant's own
+     * DataSource (its own {@code backbone_outbox} table and poller), created on
+     * first use. {@code null} when durable events are not enabled.
+     */
+    private Outbox outboxFor(String tenant) {
+        if (!durableEnabled) return null;
+        return outboxes.computeIfAbsent(tenantKey(tenant),
+            k -> new Outbox(dataSourceFor(tenant), this::deliver,
+                outboxTypes, outboxPollInterval, outboxRetention, outboxMaxAttempts));
+    }
+
+    /** Outbox used by the runner-level management methods (the default tenant). */
+    private Outbox defaultOutbox() {
+        return outboxFor(null);
     }
 
     private void flushPostCommit(AppContext ctx, boolean dispatchEventsInProcess)
@@ -426,7 +606,6 @@ public final class ServiceRunner implements AutoCloseable {
     public static final class Builder {
 
         private Function<String, DataSource> router;
-        private DataSource singleDataSource;   // backs the outbox, if enabled
         private Locale defaultLocale = Locale.getDefault();
         private final Map<String, AppService<?>> services = new HashMap<>();
         private final List<Subscription<?>> subscriptions = new ArrayList<>();
@@ -439,15 +618,13 @@ public final class ServiceRunner implements AutoCloseable {
         private Builder() {}
 
         /**
-         * Configures a single data source for all (single-tenant) requests; also
-         * used to back the outbox when durable events are enabled.
+         * Configures a single data source for all (single-tenant) requests.
          *
          * @param dataSource the JDBC data source; never {@code null}
          * @return this builder
          */
         public Builder dataSource(DataSource dataSource) {
             Objects.requireNonNull(dataSource, "dataSource");
-            this.singleDataSource = dataSource;
             this.router = tenant -> dataSource;
             return this;
         }
@@ -585,7 +762,7 @@ public final class ServiceRunner implements AutoCloseable {
                 throw new IllegalStateException("a dataSource or tenantRouter must be set");
             }
             return new ServiceRunner(router, defaultLocale, services, subscriptions,
-                singleDataSource, outboxTypes, outboxPollInterval, outboxRetention,
+                outboxTypes, outboxPollInterval, outboxRetention,
                 outboxMaxAttempts, describers);
         }
     }
