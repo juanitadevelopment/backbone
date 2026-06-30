@@ -2,6 +2,7 @@ package net.teppan.backbone;
 
 import net.teppan.shazo.Describer;
 import net.teppan.shazo.Repository;
+import net.teppan.shazo.ShazoException;
 import net.teppan.shazo.jdbc.SqlCommand;
 import net.teppan.shazo.jdbc.UnitOfWork;
 
@@ -71,6 +72,85 @@ public final class AppContext {
      */
     public <T> Repository<T> repository(Describer<T, SqlCommand> describer) {
         return unitOfWork.repository(describer);
+    }
+
+    // ── Store-anything facade (requires a configured describer registry) ────────
+
+    /**
+     * Stores each entity in this transaction, dispatching by its runtime class —
+     * the "store anything" convenience, for several types at once. Requires the
+     * runner to have been built with
+     * {@link ServiceRunner.Builder#describers(net.teppan.shazo.jdbc.Repositories)}.
+     *
+     * @param entities the entities to store; none {@code null}
+     * @throws IllegalStateException    if no describer registry is configured
+     * @throws IllegalArgumentException if an entity's type is not registered
+     * @throws ShazoException           if a store fails
+     */
+    public void store(Object... entities) throws ShazoException {
+        requireDescribers().in(unitOfWork).store(entities);
+    }
+
+    /**
+     * Deletes each entity in this transaction, dispatching by its runtime class.
+     *
+     * @param entities the entities to delete; none {@code null}
+     * @throws IllegalStateException    if no describer registry is configured
+     * @throws IllegalArgumentException if an entity's type is not registered
+     * @throws ShazoException           if a delete fails
+     */
+    public void delete(Object... entities) throws ShazoException {
+        requireDescribers().in(unitOfWork).delete(entities);
+    }
+
+    /**
+     * Returns whether the given entity exists, dispatching by its runtime class.
+     *
+     * @param entity the query entity; never {@code null}
+     * @return {@code true} if a matching record exists
+     * @throws IllegalStateException if no describer registry is configured
+     * @throws ShazoException        if the check fails
+     */
+    public boolean contains(Object entity) throws ShazoException {
+        return requireDescribers().in(unitOfWork).contains(entity);
+    }
+
+    /**
+     * Retrieves an entity of the given type within this transaction.
+     *
+     * @param type  the entity type; never {@code null}
+     * @param query a query entity carrying the key; never {@code null}
+     * @param <T>   the entity type
+     * @return the entity if found
+     * @throws IllegalStateException if no describer registry is configured
+     * @throws ShazoException        if the read fails
+     */
+    public <T> Optional<T> retrieve(Class<T> type, T query) throws ShazoException {
+        return requireDescribers().in(unitOfWork).retrieve(type, query);
+    }
+
+    /**
+     * Lists entities of the given type within this transaction.
+     *
+     * @param type  the entity type; never {@code null}
+     * @param query a query entity; never {@code null}
+     * @param <T>   the entity type
+     * @return the matching entities
+     * @throws IllegalStateException if no describer registry is configured
+     * @throws ShazoException        if the read fails
+     */
+    public <T> List<T> catalog(Class<T> type, T query) throws ShazoException {
+        return requireDescribers().in(unitOfWork).catalog(type, query);
+    }
+
+    private net.teppan.shazo.jdbc.Repositories requireDescribers() {
+        var registry = runner.describers();
+        if (registry == null) {
+            throw new IllegalStateException(
+                "No describer registry configured: build the ServiceRunner with "
+                + ".describers(...) to use store/retrieve by type, or use repository(describer).");
+        }
+        return registry;
     }
 
     /**

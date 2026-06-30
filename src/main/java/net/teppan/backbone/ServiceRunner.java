@@ -3,6 +3,7 @@ package net.teppan.backbone;
 import net.teppan.backbone.event.Outbox;
 import net.teppan.backbone.event.OutboxEntry;
 import net.teppan.shazo.ShazoException;
+import net.teppan.shazo.jdbc.Repositories;
 import net.teppan.shazo.jdbc.Transactor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -72,6 +73,7 @@ public final class ServiceRunner implements AutoCloseable {
     private final List<Subscription<?>> subscriptions;
     private final ConcurrentHashMap<String, Transactor> transactors = new ConcurrentHashMap<>();
     private final Outbox outbox;  // null when events are delivered in-process
+    private final Repositories describers;  // null when no registry configured
 
     private record Subscription<E>(Class<E> type, Consumer<E> listener) {}
 
@@ -79,11 +81,13 @@ public final class ServiceRunner implements AutoCloseable {
                           Map<String, AppService<?>> services,
                           List<Subscription<?>> subscriptions,
                           DataSource outboxDataSource, List<Class<?>> outboxTypes,
-                          Duration pollInterval, Duration retention, int maxAttempts) {
+                          Duration pollInterval, Duration retention, int maxAttempts,
+                          Repositories describers) {
         this.router        = router;
         this.defaultLocale = defaultLocale;
         this.services      = Map.copyOf(services);
         this.subscriptions = List.copyOf(subscriptions);
+        this.describers    = describers;
         if (outboxTypes.isEmpty()) {
             this.outbox = null;
         } else {
@@ -343,6 +347,11 @@ public final class ServiceRunner implements AutoCloseable {
 
     // ── Internals ─────────────────────────────────────────────────────────────
 
+    /** The describer registry for {@link AppContext#store}, or {@code null} if none. */
+    Repositories describers() {
+        return describers;
+    }
+
     private Transactor transactorFor(String tenant) {
         String key = (tenant == null) ? "" : tenant;
         return transactors.computeIfAbsent(key, k -> {
@@ -425,6 +434,7 @@ public final class ServiceRunner implements AutoCloseable {
         private Duration outboxPollInterval = Duration.ofMillis(200);
         private Duration outboxRetention = Duration.ofDays(7);
         private int outboxMaxAttempts = Outbox.DEFAULT_MAX_ATTEMPTS;
+        private Repositories describers;
 
         private Builder() {}
 
@@ -551,6 +561,19 @@ public final class ServiceRunner implements AutoCloseable {
         }
 
         /**
+         * Registers a describer registry so services can store and read by type
+         * via {@link AppContext#store(Object...)} and friends, instead of naming
+         * a describer on every call.
+         *
+         * @param describers the registry; never {@code null}
+         * @return this builder
+         */
+        public Builder describers(Repositories describers) {
+            this.describers = Objects.requireNonNull(describers, "describers");
+            return this;
+        }
+
+        /**
          * Builds the {@link ServiceRunner}.
          *
          * @return a new runner
@@ -563,7 +586,7 @@ public final class ServiceRunner implements AutoCloseable {
             }
             return new ServiceRunner(router, defaultLocale, services, subscriptions,
                 singleDataSource, outboxTypes, outboxPollInterval, outboxRetention,
-                outboxMaxAttempts);
+                outboxMaxAttempts, describers);
         }
     }
 }

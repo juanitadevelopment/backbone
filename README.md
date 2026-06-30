@@ -9,12 +9,12 @@ work per request, composable services, domain events delivered *after* commit,
 scheduled jobs, and basic runtime introspection — without a heavyweight
 container, dynamic proxies, or XML.
 
-> **Status:** early release (`0.1.4`). API may still change before `1.0.0`.
+> **Status:** early release (`0.1.5`). API may still change before `1.0.0`.
 
 ## Requirements
 
 - **Java 25+**
-- **shazo `0.1.2`** — resolved automatically from JitPack (see [Getting shazo](#getting-shazo))
+- **shazo `0.1.3`** — resolved automatically from JitPack (see [Getting shazo](#getting-shazo))
 
 ## What it gives you
 
@@ -56,6 +56,26 @@ try (var runner = ServiceRunner.builder()
 - **Nested composition** — `ctx.call(otherService)` joins the same transaction.
 - **Multitenancy** — configure `tenantRouter(tenant -> dataSource)` and pass a
   tenant to `execute` / `run`.
+
+### Storing several types without naming a describer
+
+Naming `ctx.repository(describer)` on every call gets verbose. Register a
+[`Repositories`](https://github.com/juanitadevelopment/shazo) registry once, and
+a service can store (and read) by runtime type — including a varargs `store`:
+
+```java
+var describers = Repositories.builder()
+    .register(Order.class,   orderDescriber)
+    .register(Booking.class, bookingDescriber)
+    .build();
+
+var runner = ServiceRunner.builder().dataSource(ds).describers(describers) /* ... */ .build();
+
+runner.execute("placeOrder", principal);
+// inside the service:
+ctx.store(order, booking);                       // both types, one transaction
+Optional<Order> o = ctx.retrieve(Order.class, new Order(id, null));
+```
 
 ## Durable events (transactional outbox)
 
@@ -138,12 +158,12 @@ manual install needed. The build already declares:
 
 ```kotlin
 repositories { maven { url = uri("https://jitpack.io") } }
-dependencies { api("com.github.juanitadevelopment:shazo:v0.1.2") }
+dependencies { api("com.github.juanitadevelopment:shazo:v0.1.3") }
 ```
 
 For offline development you can instead build shazo locally
 (`./gradlew publishToMavenLocal` in the shazo project) and add `mavenLocal()`
-with the `net.teppan:shazo:0.1.2` coordinate.
+with the `net.teppan:shazo:0.1.3` coordinate.
 
 ## Using backbone as a dependency
 
@@ -151,7 +171,7 @@ Backbone is itself published via JitPack:
 
 ```kotlin
 repositories { maven { url = uri("https://jitpack.io") } }
-dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.4") }
+dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.5") }
 ```
 
 JitPack builds shazo transitively, so a single dependency is enough.
