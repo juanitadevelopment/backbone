@@ -9,12 +9,12 @@ work per request, composable services, domain events delivered *after* commit,
 scheduled jobs, and basic runtime introspection — without a heavyweight
 container, dynamic proxies, or XML.
 
-> **Status:** early release (`0.1.0`). API may still change before `1.0.0`.
+> **Status:** early release (`0.1.1`). API may still change before `1.0.0`.
 
 ## Requirements
 
 - **Java 25+**
-- **shazo `0.1.1`** — resolved automatically from JitPack (see [Getting shazo](#getting-shazo))
+- **shazo `0.1.2`** — resolved automatically from JitPack (see [Getting shazo](#getting-shazo))
 
 ## What it gives you
 
@@ -84,12 +84,12 @@ manual install needed. The build already declares:
 
 ```kotlin
 repositories { maven { url = uri("https://jitpack.io") } }
-dependencies { api("com.github.juanitadevelopment:shazo:v0.1.1") }
+dependencies { api("com.github.juanitadevelopment:shazo:v0.1.2") }
 ```
 
 For offline development you can instead build shazo locally
 (`./gradlew publishToMavenLocal` in the shazo project) and add `mavenLocal()`
-with the `net.teppan:shazo:0.1.1` coordinate.
+with the `net.teppan:shazo:0.1.2` coordinate.
 
 ## Using backbone as a dependency
 
@@ -97,7 +97,7 @@ Backbone is itself published via JitPack:
 
 ```kotlin
 repositories { maven { url = uri("https://jitpack.io") } }
-dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.0") }
+dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.1") }
 ```
 
 JitPack builds shazo transitively, so a single dependency is enough.

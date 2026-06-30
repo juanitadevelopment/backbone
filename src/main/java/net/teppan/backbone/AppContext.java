@@ -75,8 +75,13 @@ public final class AppContext {
 
     /**
      * Returns the JDBC connection backing this transaction, for statements that
-     * do not fit the repository model. Callers must not commit, roll back, or
-     * close it.
+     * do not fit the repository model.
+     *
+     * <p>The returned connection is a guarded view whose transaction boundary the
+     * {@link ServiceRunner} owns: {@code commit()}, {@code rollback()},
+     * {@code close()}, {@code setAutoCommit(boolean)}, and {@code abort(Executor)}
+     * throw {@link UnsupportedOperationException}. Every other operation is
+     * forwarded to the real connection.
      *
      * @return the transaction's connection; never {@code null}
      */
