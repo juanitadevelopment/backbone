@@ -238,6 +238,21 @@ class ServiceRunnerTest {
     }
 
     @Test
+    void publishedEvents_varargs_deliversAllInOrderAfterCommit() throws Exception {
+        List<String> delivered = new ArrayList<>();
+        var runner = ServiceRunner.builder().dataSource(ds)
+            .subscribe(ItemCreated.class, e -> delivered.add(e.id()))
+            .build();
+
+        runner.run(ctx -> {
+            ctx.publish(new ItemCreated("a"), new ItemCreated("b"), new ItemCreated("c"));
+            return null;
+        }, Principal.system());
+
+        assertThat(delivered).containsExactly("a", "b", "c");
+    }
+
+    @Test
     void publishedEvents_notDeliveredWhenServiceFails() {
         List<String> delivered = new ArrayList<>();
         var runner = ServiceRunner.builder().dataSource(ds)

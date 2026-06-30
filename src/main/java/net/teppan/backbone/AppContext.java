@@ -201,13 +201,16 @@ public final class AppContext {
     // ── Deferred (post-commit) work ────────────────────────────────────────────
 
     /**
-     * Publishes a domain event to be delivered to subscribers <em>after</em> the
-     * transaction commits. If the service fails, the event is discarded.
+     * Publishes one or more domain events to be delivered to subscribers
+     * <em>after</em> the transaction commits, in the order given. If the service
+     * fails, the events are discarded along with the rolled-back transaction.
      *
-     * @param event the event to publish; never {@code null}
+     * @param events the events to publish; none {@code null}
      */
-    public void publish(Object event) {
-        pendingEvents.add(Objects.requireNonNull(event, "event"));
+    public void publish(Object... events) {
+        for (Object event : events) {
+            pendingEvents.add(Objects.requireNonNull(event, "event"));
+        }
     }
 
     /**

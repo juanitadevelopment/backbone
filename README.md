@@ -9,7 +9,7 @@ work per request, composable services, domain events delivered *after* commit,
 scheduled jobs, and basic runtime introspection — without a heavyweight
 container, dynamic proxies, or XML.
 
-> **Status:** early release (`0.1.5`). API may still change before `1.0.0`.
+> **Status:** early release (`0.1.6`). API may still change before `1.0.0`.
 
 ## Requirements
 
@@ -84,7 +84,8 @@ table **in the same transaction** as the business change, then delivered
 asynchronously by a poller — at-least-once, surviving restarts. There is never a
 committed change without its event, nor an event without its change. Subscribers
 must be idempotent. (Without `durableEvents`, events are delivered in-process,
-synchronously, right after commit.)
+synchronously, right after commit.) `ctx.publish(...)` is varargs, so several
+events can be raised in one call: `ctx.publish(orderPlaced, bookingConfirmed)`.
 
 ### Dead-letters and triage
 
@@ -171,7 +172,7 @@ Backbone is itself published via JitPack:
 
 ```kotlin
 repositories { maven { url = uri("https://jitpack.io") } }
-dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.5") }
+dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.6") }
 ```
 
 JitPack builds shazo transitively, so a single dependency is enough.
