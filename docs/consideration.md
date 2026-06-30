@@ -7,6 +7,31 @@
 
 ---
 
+## 決定ログ（このセッションで合意）
+
+- **Java ベースライン = Java 21 LTS**（従来 25 を要求していたが、使用機能は records /
+  sealed・パターンマッチ switch / 仮想スレッド / `getFirst`・`getLast`（SequencedCollection）/
+  テキストブロックで**すべて 21**。25 固有 API は未使用）。広い土台を優先し、両リポジトリの
+  toolchain と README の Requirements を 21 に下げる。
+  - `ScopedValue`（21〜24 プレビュー、25 で正式化）は**採用しない**。アンビエントなテナント
+    文脈（後述 `withTenant`）は **`ThreadLocal`** で実装。公開 API は不変なので、将来 25 前提に
+    するなら中身だけ差し替え可能。
+- **マルチテナントの公開 API**（§2.1）:
+  - 主軸 = **`runner.forTenant("acme")` ハンドル**。テナントを **1 回だけ束ねて使い回す**
+    （毎回 API 引数で指定する煩雑さを回避）。
+  - Web 境界用 = **`runner.withTenant("acme", () -> { ... })`** アンビエント・スコープ（ThreadLocal）。
+  - 現行 `execute(name, principal, tenant, locale)` は単発の跨ぎテナント用に残す。
+- **テナンシー方式 = `tenant → DataSource` を共通の継ぎ目に、DataSource ラッパで 3 方式を切替**:
+  - DB-per-tenant（別 DataSource）／ schema-per-tenant（接続時 `SET SCHEMA`）／
+    行レベル RLS（接続時 `SET app.current_tenant`、**DB ネイティブ RLS 前提**）。
+  - shazo がラッパ・ヘルパを提供。**アプリコードを変えず環境ごとに方式を差し替え可**
+    （例: テスト＝H2 の schema 分離、本番＝PostgreSQL の RLS）。
+  - **DB の RLS 無しにアプリで tenant 列条件を手書きする方式は採らない**（書き忘れ＝漏洩）。
+  - **最初に通すのは schema-per-tenant on H2**（全テスト可能）。その後ラッパで他方式へ広げる。
+- **`contains` は残す**（§1.5）。「主キー/条件での軽量な存在チェック（materialize しない）」と再定義。
+
+---
+
 ## 1. 永続化層（shazo）
 
 ### 1.1 `gather` の N+1 と、大量データの扱い 🔴
@@ -81,12 +106,15 @@
   - **TimerScheduler は単一 DataSource**・テナント文脈なし。⚠️
   - **schema-per-tenant 未対応**（DataSource 分離のみ。旧 `<S>` 相当なし）。❌
 - **なぜ重要**: 実アプリでは Outbox / Timer もテナント単位で正しく回る必要がある。
-- **方向性（要設計）**:
-  1. まず**テナンシー方式**を決める: DB-per-tenant / schema-per-tenant / 行レベル（tenant 列）。
-  2. **テナントごとの Outbox**: テナント DB ごとに表＋poller、または横断単一 Outbox に tenant 列。
-  3. **TimerJob のテナント実行**: テナント文脈付き実行（全テナント fan-out / 指定テナント）。
-  4. **schema-per-tenant**: 接続後にスキーマ / search_path を切替えるモード。
-  5. テナント解決・文脈伝播を `AppContext` 経由でイベント / タイマーまで一級市民化。
+- **決定した設計**（→ 冒頭「決定ログ」参照）:
+  - 公開 API: **`forTenant` ハンドル ＋ `withTenant`（ThreadLocal）**。方式非依存。
+  - 方式: **`tenant → DataSource` を継ぎ目に、DataSource ラッパで DB-per-tenant /
+    schema-per-tenant / RLS を切替**（shazo がヘルパ提供）。まず **schema-per-tenant on H2**。
+- **残る実装の本丸**:
+  1. **テナントごとの Outbox**: `forTenant` 経由の publish を**そのテナントの接続**へ書き、
+     **テナント単位で poller** を回す（テナント DataSource を遅延発見 → スキーマ適用 → poller 起動）。
+  2. **TimerJob のテナント実行**: テナント文脈付き実行（指定テナント／全テナント fan-out）。
+  3. テナント文脈の `AppContext` → イベント / タイマーへの伝播を一級市民化。
 
 ### 2.2 認可（Authorization）フックがない 🔴
 - **現状**: `ServiceRunner` は `Principal` を運ぶが、**ロール / 権限の検査機構がない**。
