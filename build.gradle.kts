@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "net.teppan"
-version = "0.1.6"
+version = "0.1.7"
 
 java {
     toolchain {
@@ -23,7 +23,7 @@ repositories {
 dependencies {
     // Backbone's public API exposes shazo types (repositories, describers,
     // unit-of-work), so shazo is an `api` dependency.
-    api("com.github.juanitadevelopment:shazo:v0.1.3")
+    api("com.github.juanitadevelopment:shazo:v0.1.4")
 
     implementation("org.slf4j:slf4j-api:2.0.11")
 
@@ -44,15 +44,15 @@ tasks.withType<JavaCompile> {
 }
 
 tasks.javadoc {
-    title = "Backbone 0.1.6 API"
+    title = "Backbone 0.1.7 API"
     (options as StandardJavadocDocletOptions).apply {
         encoding = "UTF-8"
         charSet = "UTF-8"
         locale = "en"
         addStringOption("Xdoclint:all", "-quiet")
         addBooleanOption("html5", true)
-        windowTitle = "Backbone 0.1.6 API"
-        header = "<b>Backbone 0.1.6</b>"
+        windowTitle = "Backbone 0.1.7 API"
+        header = "<b>Backbone 0.1.7</b>"
         bottom = "Copyright &#169; 2026 net.teppan. All rights reserved."
     }
 }

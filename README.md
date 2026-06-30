@@ -9,12 +9,12 @@ work per request, composable services, domain events delivered *after* commit,
 scheduled jobs, and basic runtime introspection — without a heavyweight
 container, dynamic proxies, or XML.
 
-> **Status:** early release (`0.1.6`). API may still change before `1.0.0`.
+> **Status:** early release (`0.1.7`). API may still change before `1.0.0`.
 
 ## Requirements
 
 - **Java 25+**
-- **shazo `0.1.3`** — resolved automatically from JitPack (see [Getting shazo](#getting-shazo))
+- **shazo `0.1.4`** — resolved automatically from JitPack (see [Getting shazo](#getting-shazo))
 
 ## What it gives you
 
@@ -36,11 +36,14 @@ record OrderPlaced(String orderId) implements java.io.Serializable {}
 
 try (var runner = ServiceRunner.builder()
         .dataSource(dataSource)
+        .describers(Repositories.builder()                 // storage binding lives in the wiring
+            .register(Order.class, orderDescriber)
+            .register(Audit.class, auditDescriber)
+            .build())
         .durableEvents(OrderPlaced.class)                 // at-least-once, survives restart
         .subscribe(OrderPlaced.class, e -> mailer.confirm(e.orderId()))
         .register("placeOrder", ctx -> {
-            ctx.repository(orderDescriber).store(order);   // transaction-scoped
-            ctx.repository(auditDescriber).store(audit);   // commits atomically with the order
+            ctx.store(order, audit);                       // both types, one transaction
             ctx.publish(new OrderPlaced(order.id()));      // delivered only after commit
             return order.id();
         })
@@ -50,18 +53,25 @@ try (var runner = ServiceRunner.builder()
 }
 ```
 
-- **Atomic across repositories** — every `ctx.repository(...)` shares the transaction.
+Services name only domain types (`ctx.store(order)`, `ctx.repository(Order.class)`,
+`ctx.retrieve(Order.class, key)`); which describer — and therefore which storage —
+backs each type is configured once, in the wiring. No JDBC types leak into service code.
+
+- **Atomic across types** — everything a service stores shares the transaction.
 - **Events after commit** — published events reach subscribers only once the
   transaction commits; a failure rolls everything back and discards them.
 - **Nested composition** — `ctx.call(otherService)` joins the same transaction.
 - **Multitenancy** — configure `tenantRouter(tenant -> dataSource)` and pass a
   tenant to `execute` / `run`.
 
-### Storing several types without naming a describer
+### The describer registry (storage in the wiring, not in services)
 
-Naming `ctx.repository(describer)` on every call gets verbose. Register a
-[`Repositories`](https://github.com/juanitadevelopment/shazo) registry once, and
-a service can store (and read) by runtime type — including a varargs `store`:
+A service should not name the storage. With a
+[`Repositories`](https://github.com/juanitadevelopment/shazo) registry, the
+describers (which carry the JDBC command type) are declared once at wiring time,
+and services address persistence purely by domain type — `ctx.store(...)`
+(varargs), `ctx.delete(...)`, `ctx.repository(Order.class)`, and
+`ctx.retrieve(Order.class, key)`:
 
 ```java
 var describers = Repositories.builder()
@@ -71,9 +81,9 @@ var describers = Repositories.builder()
 
 var runner = ServiceRunner.builder().dataSource(ds).describers(describers) /* ... */ .build();
 
-runner.execute("placeOrder", principal);
-// inside the service:
+// inside a service:
 ctx.store(order, booking);                       // both types, one transaction
+Repository<Order> orders = ctx.repository(Order.class);
 Optional<Order> o = ctx.retrieve(Order.class, new Order(id, null));
 ```
 
@@ -159,12 +169,12 @@ manual install needed. The build already declares:
 
 ```kotlin
 repositories { maven { url = uri("https://jitpack.io") } }
-dependencies { api("com.github.juanitadevelopment:shazo:v0.1.3") }
+dependencies { api("com.github.juanitadevelopment:shazo:v0.1.4") }
 ```
 
 For offline development you can instead build shazo locally
 (`./gradlew publishToMavenLocal` in the shazo project) and add `mavenLocal()`
-with the `net.teppan:shazo:0.1.3` coordinate.
+with the `net.teppan:shazo:0.1.4` coordinate.
 
 ## Using backbone as a dependency
 
@@ -172,7 +182,7 @@ Backbone is itself published via JitPack:
 
 ```kotlin
 repositories { maven { url = uri("https://jitpack.io") } }
-dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.6") }
+dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.7") }
 ```
 
 JitPack builds shazo transitively, so a single dependency is enough.

@@ -2,6 +2,7 @@ package net.teppan.backbone;
 
 import net.teppan.shazo.Describer;
 import net.teppan.shazo.jdbc.JdbcRepository;
+import net.teppan.shazo.jdbc.Repositories;
 import net.teppan.shazo.jdbc.SqlCommand;
 import net.teppan.shazo.jdbc.embedded.EmbeddedDataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -27,6 +28,7 @@ class ServiceRunnerTest {
 
     private DataSource ds;
     private Describer<Item, SqlCommand> items;
+    private Repositories repos;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -46,6 +48,7 @@ class ServiceRunnerTest {
             .cataloger(r -> r.rows().stream().map(row -> new Item(
                 (String) row.get("id"), (String) row.get("name"))).toList())
             .build();
+        repos = Repositories.builder().register(Item.class, items).build();
     }
 
     private boolean persisted(String id) throws Exception {
@@ -56,7 +59,7 @@ class ServiceRunnerTest {
 
     @Test
     void execute_runsRegisteredService() throws AppServiceException {
-        var runner = ServiceRunner.builder().dataSource(ds)
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos)
             .register("greet", ctx -> "Hello, " + ctx.principal().displayName())
             .build();
         String result = runner.execute("greet", new Principal("u1", "Alice", Set.of()));
@@ -65,7 +68,7 @@ class ServiceRunnerTest {
 
     @Test
     void execute_usesDefaultLocale() throws AppServiceException {
-        var runner = ServiceRunner.builder().dataSource(ds).defaultLocale(Locale.JAPAN)
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos).defaultLocale(Locale.JAPAN)
             .register("locale", ctx -> ctx.locale().toLanguageTag())
             .build();
         assertThat(runner.<String>execute("locale", Principal.anonymous())).isEqualTo("ja-JP");
@@ -73,7 +76,7 @@ class ServiceRunnerTest {
 
     @Test
     void execute_withExplicitLocale_overridesDefault() throws AppServiceException {
-        var runner = ServiceRunner.builder().dataSource(ds).defaultLocale(Locale.JAPAN)
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos).defaultLocale(Locale.JAPAN)
             .register("locale", ctx -> ctx.locale().toLanguageTag())
             .build();
         assertThat(runner.<String>execute("locale", Principal.anonymous(), null, Locale.US))
@@ -82,7 +85,7 @@ class ServiceRunnerTest {
 
     @Test
     void execute_unknownName_throwsIllegalArgumentException() {
-        var runner = ServiceRunner.builder().dataSource(ds).build();
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos).build();
         assertThatThrownBy(() -> runner.execute("no-such-service", Principal.anonymous()))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("no-such-service");
@@ -90,7 +93,7 @@ class ServiceRunnerTest {
 
     @Test
     void serviceNames_listsRegisteredServices() {
-        var runner = ServiceRunner.builder().dataSource(ds)
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos)
             .register("a", ctx -> null)
             .register("b", ctx -> null)
             .build();
@@ -99,13 +102,13 @@ class ServiceRunnerTest {
 
     @Test
     void pendingEventCount_emptyWithoutOutbox() {
-        var runner = ServiceRunner.builder().dataSource(ds).build();
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos).build();
         assertThat(runner.pendingEventCount()).isEmpty();
     }
 
     @Test
     void pendingEventCount_presentWithOutbox() {
-        try (var runner = ServiceRunner.builder().dataSource(ds)
+        try (var runner = ServiceRunner.builder().dataSource(ds).describers(repos)
                 .durableEvents(ItemCreated.class).build()) {
             assertThat(runner.pendingEventCount()).isPresent();
             assertThat(runner.pendingEventCount().getAsLong()).isZero();
@@ -114,7 +117,7 @@ class ServiceRunnerTest {
 
     @Test
     void outboxManagement_emptyWithoutOutbox() {
-        var runner = ServiceRunner.builder().dataSource(ds).build();
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos).build();
         assertThat(runner.deadLetterCount()).isEmpty();
         assertThat(runner.pendingEvents(10)).isEmpty();
         assertThat(runner.deadLetterEvents(10)).isEmpty();
@@ -126,7 +129,7 @@ class ServiceRunnerTest {
     void deadLetterThenRetry_throughRunner() throws Exception {
         var down = new java.util.concurrent.atomic.AtomicBoolean(true);
         var delivered = new java.util.concurrent.CopyOnWriteArrayList<String>();
-        try (var runner = ServiceRunner.builder().dataSource(ds)
+        try (var runner = ServiceRunner.builder().dataSource(ds).describers(repos)
                 .durableEvents(ItemCreated.class)
                 .outboxMaxAttempts(2)
                 .outboxPollInterval(java.time.Duration.ofMillis(30))
@@ -135,7 +138,7 @@ class ServiceRunnerTest {
                     delivered.add(e.id());
                 })
                 .register("create", ctx -> {
-                    ctx.repository(items).store(new Item("x1", "X"));
+                    ctx.repository(Item.class).store(new Item("x1", "X"));
                     ctx.publish(new ItemCreated("x1"));
                     return null;
                 })
@@ -169,7 +172,7 @@ class ServiceRunnerTest {
 
     @Test
     void run_adHocService_executesWithContext() throws AppServiceException {
-        var runner = ServiceRunner.builder().dataSource(ds).build();
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos).build();
         var result = runner.run(ctx -> ctx.principal().id(), Principal.system());
         assertThat(result).isEqualTo("system");
     }
@@ -185,9 +188,9 @@ class ServiceRunnerTest {
 
     @Test
     void multipleWritesCommitAtomically() throws Exception {
-        var runner = ServiceRunner.builder().dataSource(ds).build();
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos).build();
         runner.run(ctx -> {
-            var repo = ctx.repository(items);
+            var repo = ctx.repository(Item.class);
             repo.store(new Item("a", "Alpha"));
             repo.store(new Item("b", "Beta"));
             return null;
@@ -199,9 +202,9 @@ class ServiceRunnerTest {
 
     @Test
     void serviceFailure_rollsBackAllWrites() throws Exception {
-        var runner = ServiceRunner.builder().dataSource(ds).build();
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos).build();
         assertThatThrownBy(() -> runner.run(ctx -> {
-            ctx.repository(items).store(new Item("c", "Gamma"));
+            ctx.repository(Item.class).store(new Item("c", "Gamma"));
             throw new AppServiceException("boom");
         }, Principal.system())).isInstanceOf(AppServiceException.class);
 
@@ -210,7 +213,7 @@ class ServiceRunnerTest {
 
     @Test
     void nonAppServiceException_wrappedInAppServiceException() {
-        var runner = ServiceRunner.builder().dataSource(ds).build();
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos).build();
         assertThatThrownBy(() -> runner.run(ctx -> {
             throw new RuntimeException("raw error");
         }, Principal.anonymous()))
@@ -223,12 +226,12 @@ class ServiceRunnerTest {
     @Test
     void publishedEvents_deliveredToSubscriberAfterCommit() throws Exception {
         List<String> delivered = new ArrayList<>();
-        var runner = ServiceRunner.builder().dataSource(ds)
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos)
             .subscribe(ItemCreated.class, e -> delivered.add(e.id()))
             .build();
 
         runner.run(ctx -> {
-            ctx.repository(items).store(new Item("x", "Xi"));
+            ctx.repository(Item.class).store(new Item("x", "Xi"));
             ctx.publish(new ItemCreated("x"));
             return null;
         }, Principal.system());
@@ -240,7 +243,7 @@ class ServiceRunnerTest {
     @Test
     void publishedEvents_varargs_deliversAllInOrderAfterCommit() throws Exception {
         List<String> delivered = new ArrayList<>();
-        var runner = ServiceRunner.builder().dataSource(ds)
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos)
             .subscribe(ItemCreated.class, e -> delivered.add(e.id()))
             .build();
 
@@ -255,7 +258,7 @@ class ServiceRunnerTest {
     @Test
     void publishedEvents_notDeliveredWhenServiceFails() {
         List<String> delivered = new ArrayList<>();
-        var runner = ServiceRunner.builder().dataSource(ds)
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos)
             .subscribe(ItemCreated.class, e -> delivered.add(e.id()))
             .build();
 
@@ -270,7 +273,7 @@ class ServiceRunnerTest {
     @Test
     void afterCommit_runsAfterSuccess() throws AppServiceException {
         List<String> log = new ArrayList<>();
-        var runner = ServiceRunner.builder().dataSource(ds).build();
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos).build();
         runner.run(ctx -> {
             ctx.afterCommit(() -> log.add("committed"));
             return null;
@@ -281,7 +284,7 @@ class ServiceRunnerTest {
     @Test
     void afterCommit_doesNotRunWhenServiceThrows() {
         List<String> log = new ArrayList<>();
-        var runner = ServiceRunner.builder().dataSource(ds).build();
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos).build();
         assertThatThrownBy(() -> runner.run(ctx -> {
             ctx.afterCommit(() -> log.add("should-not-run"));
             throw new AppServiceException("boom");
@@ -291,7 +294,7 @@ class ServiceRunnerTest {
 
     @Test
     void postCommitFailures_collectedAsSuppressed() {
-        var runner = ServiceRunner.builder().dataSource(ds).build();
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos).build();
         assertThatThrownBy(() -> runner.run(ctx -> {
             ctx.afterCommit(() -> { throw new RuntimeException("first"); });
             ctx.afterCommit(() -> { throw new RuntimeException("second"); });
@@ -305,15 +308,15 @@ class ServiceRunnerTest {
 
     @Test
     void nestedCall_sharesTransaction_rollbackUndoesInnerWrites() throws Exception {
-        var runner = ServiceRunner.builder().dataSource(ds).build();
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos).build();
 
         AppService<Void> inner = ctx -> {
-            ctx.repository(items).store(new Item("inner", "Inner"));
+            ctx.repository(Item.class).store(new Item("inner", "Inner"));
             return null;
         };
 
         assertThatThrownBy(() -> runner.run(ctx -> {
-            ctx.repository(items).store(new Item("outer", "Outer"));
+            ctx.repository(Item.class).store(new Item("outer", "Outer"));
             ctx.call(inner);                 // joins the same transaction
             throw new AppServiceException("rollback both");
         }, Principal.system())).isInstanceOf(AppServiceException.class);
@@ -329,14 +332,14 @@ class ServiceRunnerTest {
     void durableEvents_persistedInTxAndDeliveredAfterCommit() throws Exception {
         var delivered = new CopyOnWriteArrayList<String>();
         var latch = new CountDownLatch(1);
-        try (var runner = ServiceRunner.builder().dataSource(ds)
+        try (var runner = ServiceRunner.builder().dataSource(ds).describers(repos)
                 .durableEvents(ItemCreated.class)
                 .outboxPollInterval(java.time.Duration.ofMillis(50))
                 .subscribe(ItemCreated.class, e -> { delivered.add(e.id()); latch.countDown(); })
                 .build()) {
 
             runner.run(ctx -> {
-                ctx.repository(items).store(new Item("d1", "Durable"));
+                ctx.repository(Item.class).store(new Item("d1", "Durable"));
                 ctx.publish(new ItemCreated("d1"));
                 return null;
             }, Principal.system());
@@ -350,7 +353,7 @@ class ServiceRunnerTest {
     @Test
     void durableEvents_notDeliveredWhenServiceFails() throws Exception {
         var delivered = new CopyOnWriteArrayList<String>();
-        try (var runner = ServiceRunner.builder().dataSource(ds)
+        try (var runner = ServiceRunner.builder().dataSource(ds).describers(repos)
                 .durableEvents(ItemCreated.class)
                 .outboxPollInterval(java.time.Duration.ofMillis(50))
                 .subscribe(ItemCreated.class, e -> delivered.add(e.id()))
@@ -369,12 +372,12 @@ class ServiceRunnerTest {
     @Test
     void nestedCall_eventsFlushedOnceAtOuterCommit() throws Exception {
         List<String> delivered = new ArrayList<>();
-        var runner = ServiceRunner.builder().dataSource(ds)
+        var runner = ServiceRunner.builder().dataSource(ds).describers(repos)
             .subscribe(ItemCreated.class, e -> delivered.add(e.id()))
             .build();
 
         AppService<Void> inner = ctx -> {
-            ctx.repository(items).store(new Item("n1", "N1"));
+            ctx.repository(Item.class).store(new Item("n1", "N1"));
             ctx.publish(new ItemCreated("n1"));
             return null;
         };

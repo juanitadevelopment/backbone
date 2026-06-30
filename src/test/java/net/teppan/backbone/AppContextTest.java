@@ -77,9 +77,11 @@ class AppContextTest {
 
     @Test
     void repository_roundTripWithinTransaction() throws AppServiceException {
-        var runner = ServiceRunner.builder().dataSource(ds).build();
+        var registry = net.teppan.shazo.jdbc.Repositories.builder()
+            .register(Item.class, items).build();
+        var runner = ServiceRunner.builder().dataSource(ds).describers(registry).build();
         var found = runner.run(ctx -> {
-            var repo = ctx.repository(items);
+            var repo = ctx.repository(Item.class);
             repo.store(new Item("k", "Kappa"));
             return repo.retrieve(new Item("k", null)).orElseThrow();
         }, Principal.system());

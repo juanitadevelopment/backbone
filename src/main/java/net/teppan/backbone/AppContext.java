@@ -1,9 +1,7 @@
 package net.teppan.backbone;
 
-import net.teppan.shazo.Describer;
 import net.teppan.shazo.Repository;
 import net.teppan.shazo.ShazoException;
-import net.teppan.shazo.jdbc.SqlCommand;
 import net.teppan.shazo.jdbc.UnitOfWork;
 
 import java.sql.Connection;
@@ -20,11 +18,11 @@ import java.util.Optional;
  * {@link UnitOfWork} (one database transaction). It exposes:
  *
  * <ul>
- *   <li>transaction-scoped {@linkplain #repository(Describer) repositories} —
+ *   <li>transaction-scoped {@linkplain #repository(Class) repositories} —
  *       all sharing one connection, so multi-entity work commits atomically;</li>
  *   <li>the authenticated {@link Principal}, optional {@code tenant}, and
  *       request {@link Locale};</li>
- *   <li>{@link #publish(Object)} for domain events delivered <em>after</em> the
+ *   <li>{@link #publish(Object...)} for domain events delivered <em>after</em> the
  *       transaction commits;</li>
  *   <li>{@link #afterCommit(Runnable)} for arbitrary post-commit work;</li>
  *   <li>{@link #call(AppService)} to invoke another service within the
@@ -59,22 +57,29 @@ public final class AppContext {
         this.runner     = Objects.requireNonNull(runner,     "runner");
     }
 
-    // ── Transaction-scoped persistence ─────────────────────────────────────────
+    // ── Transaction-scoped persistence (via the describer registry) ─────────────
 
     /**
-     * Returns a repository for {@code describer} bound to this context's
-     * transaction. All repositories obtained from one context share a single
-     * connection and commit together.
+     * Returns a repository for the registered domain {@code type}, bound to this
+     * context's transaction. All repositories obtained from one context share a
+     * single connection and commit together.
      *
-     * @param describer the describer for domain type {@code T}; never {@code null}
-     * @param <T>       the domain type
+     * <p>The service names only the domain type; which describer (and therefore
+     * which storage) backs it is configured once on the runner via
+     * {@link ServiceRunner.Builder#describers(net.teppan.shazo.jdbc.Repositories)}.
+     * This keeps storage choice out of service signatures.
+     *
+     * @param type the domain type; never {@code null}
+     * @param <T>  the domain type
      * @return a transaction-scoped repository
+     * @throws IllegalStateException    if no describer registry is configured
+     * @throws IllegalArgumentException if the type is not registered
      */
-    public <T> Repository<T> repository(Describer<T, SqlCommand> describer) {
-        return unitOfWork.repository(describer);
+    public <T> Repository<T> repository(Class<T> type) {
+        return requireDescribers().in(unitOfWork).repository(type);
     }
 
-    // ── Store-anything facade (requires a configured describer registry) ────────
+    // ── Store-anything facade (also via the describer registry) ─────────────────
 
     /**
      * Stores each entity in this transaction, dispatching by its runtime class —
