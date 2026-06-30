@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 
 import javax.sql.DataSource;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.ZonedDateTime;
 import java.util.Locale;
 import java.util.Map;
@@ -19,7 +20,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Cron and interval scheduler for {@link TimerJob} instances.
+ * Interval, cron, and one-shot scheduler for {@link TimerJob} instances.
  *
  * <p>Each job runs on a virtual thread provided by a
  * {@link ScheduledExecutorService}. Jobs receive a system {@link AppContext}
@@ -41,6 +42,10 @@ import java.util.concurrent.TimeUnit;
  * scheduler.schedule("nightly-cleanup", "0 0 2 * * *",
  *     ctx -> cleanupService.run(ctx));
  *
+ * // one-shot (a deadline: expire this request in 48 hours)
+ * scheduler.schedule("expire-" + id, Instant.now().plus(Duration.ofHours(48)),
+ *     ctx -> approvals.expire(ctx, id));
+ *
  * scheduler.suspend("heartbeat");
  * scheduler.resume("heartbeat");
  * scheduler.cancel("heartbeat");
@@ -57,7 +62,9 @@ public final class TimerScheduler implements AutoCloseable {
         /** The job has been paused; no executions occur until {@link TimerScheduler#resume} is called. */
         SUSPENDED,
         /** The job has been permanently stopped and cannot be resumed. */
-        CANCELLED
+        CANCELLED,
+        /** A one-shot job that has already fired. */
+        COMPLETED
     }
 
     /** Default number of scheduler threads (jobs run concurrently up to this). */
@@ -106,7 +113,7 @@ public final class TimerScheduler implements AutoCloseable {
         long millis = interval.toMillis();
         Future<?> future = executor.scheduleAtFixedRate(
             () -> runJob(name, job), millis, millis, TimeUnit.MILLISECONDS);
-        jobs.put(name, new JobEntry(job, null, interval, future, JobStatus.RUNNING));
+        jobs.put(name, new JobEntry(job, null, interval, null, future, JobStatus.RUNNING));
     }
 
     /**
@@ -126,9 +133,38 @@ public final class TimerScheduler implements AutoCloseable {
         checkNotRegistered(name);
 
         CronExpression cron = CronExpression.parse(cronExpression);
-        JobEntry entry = new JobEntry(job, cron, null, null, JobStatus.RUNNING);
+        JobEntry entry = new JobEntry(job, cron, null, null, null, JobStatus.RUNNING);
         jobs.put(name, entry);
         scheduleCronRun(name, cron, job);
+    }
+
+    /**
+     * Schedules a job to run <em>once</em> at the given instant. If the instant is
+     * already in the past the job runs as soon as possible.
+     *
+     * <p>After it fires, the job's status becomes {@link JobStatus#COMPLETED}. A
+     * pending one-shot can be {@link #suspend(String) suspended} (which disarms
+     * it) and {@link #resume(String) resumed} (which re-arms it for the original
+     * instant — immediately, if that instant has since passed) or
+     * {@link #cancel(String) cancelled}.
+     *
+     * <p>This schedule lives only in memory: a one-shot pending when the JVM
+     * stops is lost. For deadlines that must survive a restart, persist them in
+     * your own table and rearm on startup.
+     *
+     * @param name a unique job name; never {@code null}
+     * @param when the instant to run at; never {@code null}
+     * @param job  the task to run; never {@code null}
+     * @throws IllegalArgumentException if {@code name} is already registered
+     */
+    public void schedule(String name, Instant when, TimerJob job) {
+        Objects.requireNonNull(name, "name");
+        Objects.requireNonNull(when, "when");
+        Objects.requireNonNull(job,  "job");
+        checkNotRegistered(name);
+
+        jobs.put(name, new JobEntry(job, null, null, when, null, JobStatus.RUNNING));
+        scheduleOneShotRun(name, when, job);
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -167,11 +203,14 @@ public final class TimerScheduler implements AutoCloseable {
         if (entry.cron() != null) {
             jobs.put(name, entry.withStatus(JobStatus.RUNNING).withFuture(null));
             scheduleCronRun(name, entry.cron(), entry.job());
-        } else {
+        } else if (entry.interval() != null) {
             long millis = entry.interval().toMillis();
             Future<?> future = executor.scheduleAtFixedRate(
                 () -> runJob(name, entry.job()), millis, millis, TimeUnit.MILLISECONDS);
             jobs.put(name, entry.withStatus(JobStatus.RUNNING).withFuture(future));
+        } else {
+            jobs.put(name, entry.withStatus(JobStatus.RUNNING).withFuture(null));
+            scheduleOneShotRun(name, entry.fireAt(), entry.job());
         }
         log.info("Job '{}' resumed", name);
     }
@@ -247,6 +286,21 @@ public final class TimerScheduler implements AutoCloseable {
         jobs.computeIfPresent(name, (k, e) -> e.withFuture(future));
     }
 
+    private void scheduleOneShotRun(String name, Instant when, TimerJob job) {
+        long delayMillis = Duration.between(Instant.now(), when).toMillis();
+        if (delayMillis < 0) delayMillis = 0;
+
+        Future<?> future = executor.schedule(() -> {
+            runJob(name, job);
+            // One-shot: a successful fire moves RUNNING -> COMPLETED. Leave a
+            // concurrently suspended/cancelled job in its terminal/paused state.
+            jobs.computeIfPresent(name, (k, e) ->
+                e.status() == JobStatus.RUNNING ? e.withStatus(JobStatus.COMPLETED) : e);
+        }, delayMillis, TimeUnit.MILLISECONDS);
+
+        jobs.computeIfPresent(name, (k, e) -> e.withFuture(future));
+    }
+
     private void checkNotRegistered(String name) {
         if (jobs.containsKey(name)) {
             throw new IllegalArgumentException("Job already registered: " + name);
@@ -265,17 +319,18 @@ public final class TimerScheduler implements AutoCloseable {
 
     private record JobEntry(
             TimerJob job,
-            CronExpression cron,     // null for interval jobs
-            Duration interval,       // null for cron jobs
+            CronExpression cron,     // null unless a cron job
+            Duration interval,       // null unless an interval job
+            Instant fireAt,          // null unless a one-shot job
             Future<?> future,
             JobStatus status) {
 
         JobEntry withStatus(JobStatus s) {
-            return new JobEntry(job, cron, interval, future, s);
+            return new JobEntry(job, cron, interval, fireAt, future, s);
         }
 
         JobEntry withFuture(Future<?> f) {
-            return new JobEntry(job, cron, interval, f, status);
+            return new JobEntry(job, cron, interval, fireAt, f, status);
         }
     }
 

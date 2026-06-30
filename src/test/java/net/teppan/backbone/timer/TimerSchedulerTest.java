@@ -128,6 +128,61 @@ class TimerSchedulerTest {
             .containsEntry("j2", TimerScheduler.JobStatus.SUSPENDED);
     }
 
+    // ── One-shot jobs ────────────────────────────────────────────────────────────
+
+    @Test
+    void oneShotJob_firesOnceThenCompletes() throws InterruptedException {
+        var fires = new java.util.concurrent.atomic.AtomicInteger();
+        var latch = new CountDownLatch(1);
+        scheduler.schedule("deadline", java.time.Instant.now().plusMillis(50), ctx -> {
+            fires.incrementAndGet();
+            latch.countDown();
+        });
+        assertThat(latch.await(2, TimeUnit.SECONDS)).isTrue();
+
+        long deadlineMs = System.currentTimeMillis() + 1000;
+        while (scheduler.status("deadline") != TimerScheduler.JobStatus.COMPLETED
+                && System.currentTimeMillis() < deadlineMs) {
+            Thread.sleep(20);
+        }
+        assertThat(scheduler.status("deadline")).isEqualTo(TimerScheduler.JobStatus.COMPLETED);
+
+        Thread.sleep(150);
+        assertThat(fires.get()).isEqualTo(1);   // really only once
+    }
+
+    @Test
+    void oneShotJob_pastInstant_firesImmediately() throws InterruptedException {
+        var latch = new CountDownLatch(1);
+        scheduler.schedule("overdue", java.time.Instant.now().minusSeconds(60),
+            ctx -> latch.countDown());
+        assertThat(latch.await(2, TimeUnit.SECONDS)).isTrue();
+    }
+
+    @Test
+    void oneShotJob_canBeCancelledBeforeItFires() throws InterruptedException {
+        var fired = new java.util.concurrent.atomic.AtomicBoolean(false);
+        scheduler.schedule("future", java.time.Instant.now().plusMillis(500),
+            ctx -> fired.set(true));
+        scheduler.cancel("future");
+        assertThat(scheduler.status("future")).isEqualTo(TimerScheduler.JobStatus.CANCELLED);
+        Thread.sleep(700);
+        assertThat(fired).isFalse();
+    }
+
+    @Test
+    void oneShotJob_suspendThenResume_reArmsForOriginalInstant() throws InterruptedException {
+        var latch = new CountDownLatch(1);
+        // Far enough out that we can suspend before it fires.
+        scheduler.schedule("pause-me", java.time.Instant.now().plusMillis(400),
+            ctx -> latch.countDown());
+        scheduler.suspend("pause-me");
+        assertThat(scheduler.status("pause-me")).isEqualTo(TimerScheduler.JobStatus.SUSPENDED);
+
+        scheduler.resume("pause-me");   // original instant already near/passed -> fires soon
+        assertThat(latch.await(2, TimeUnit.SECONDS)).isTrue();
+    }
+
     @Test
     void status_unknownJob_throwsIllegalArgumentException() {
         assertThatThrownBy(() -> scheduler.status("ghost"))

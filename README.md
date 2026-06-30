@@ -9,7 +9,7 @@ work per request, composable services, domain events delivered *after* commit,
 scheduled jobs, and basic runtime introspection — without a heavyweight
 container, dynamic proxies, or XML.
 
-> **Status:** early release (`0.1.3`). API may still change before `1.0.0`.
+> **Status:** early release (`0.1.4`). API may still change before `1.0.0`.
 
 ## Requirements
 
@@ -25,7 +25,7 @@ container, dynamic proxies, or XML.
 | Service unit | `AppService<R>` | A lambda `AppContext -> R` |
 | Identity | `Principal` | Immutable id + roles; `anonymous()` / `system()` |
 | Domain events | `ServiceRunner.subscribe` + `Outbox` | In-process or durable (transactional outbox), delivered after commit |
-| Scheduling | `TimerScheduler`, `CronExpression` | Interval and 6-field cron jobs as system units of work |
+| Scheduling | `TimerScheduler`, `CronExpression` | Interval, 6-field cron, and one-shot (deadline) jobs as system units of work |
 | Operations | `BackboneConsole` | One surface to view and control the runner and scheduler at run time |
 
 ## Core idea: a service is a transaction
@@ -92,11 +92,17 @@ runner.discardEvent(id);              // drop permanently
 try (var scheduler = TimerScheduler.builder().dataSource(dataSource).build()) {
     scheduler.schedule("nightly", "0 0 2 * * *", ctx -> cleanup(ctx)); // 6-field cron
     scheduler.schedule("heartbeat", Duration.ofSeconds(30), ctx -> ping(ctx));
+
+    // one-shot deadline: expire this request in 48 hours (fires once, then COMPLETED)
+    scheduler.schedule("expire-" + id, Instant.now().plus(Duration.ofHours(48)),
+        ctx -> approvals.expire(ctx, id));
 }
 ```
 
 Each job runs as a `Principal.system()` unit of work; jobs can be
-`suspend`/`resume`/`cancel`led and inspected via `jobStatuses()`.
+`suspend`/`resume`/`cancel`led and inspected via `jobStatuses()`. One-shot jobs
+live in memory only — for deadlines that must survive a restart, persist them and
+rearm on startup.
 
 ## Operations console
 
@@ -145,7 +151,7 @@ Backbone is itself published via JitPack:
 
 ```kotlin
 repositories { maven { url = uri("https://jitpack.io") } }
-dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.3") }
+dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.4") }
 ```
 
 JitPack builds shazo transitively, so a single dependency is enough.
