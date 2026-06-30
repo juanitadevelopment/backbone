@@ -38,10 +38,9 @@ class AppContextTest {
             .delete(i   -> List.of(SqlCommand.of("DELETE FROM item WHERE id = ?", i.id())))
             .retrieve(i -> List.of(SqlCommand.of("SELECT id, name FROM item WHERE id = ?", i.id())))
             .catalog(i  -> List.of(SqlCommand.of("SELECT id, name FROM item")))
-            .infuser(r  -> r.first().map(row -> new Item(
+            .infuser(r  -> r.primary().first().map(row -> new Item(
                 (String) row.get("id"), (String) row.get("name"))).orElseThrow())
-            .cataloger(r -> r.rows().stream().map(row -> new Item(
-                (String) row.get("id"), (String) row.get("name"))).toList())
+            .key(row -> new Item((String) row.get("id"), null))
             .build();
     }
 
@@ -101,10 +100,9 @@ class AppContextTest {
             .delete(g   -> List.of(SqlCommand.of("DELETE FROM gizmo WHERE id = ?", g.id())))
             .retrieve(g -> List.of(SqlCommand.of("SELECT id, label FROM gizmo WHERE id = ?", g.id())))
             .catalog(g  -> List.of(SqlCommand.of("SELECT id, label FROM gizmo")))
-            .infuser(r  -> r.first().map(row -> new Gizmo(
+            .infuser(r  -> r.primary().first().map(row -> new Gizmo(
                 (String) row.get("id"), (String) row.get("label"))).orElseThrow())
-            .cataloger(r -> r.rows().stream().map(row -> new Gizmo(
-                (String) row.get("id"), (String) row.get("label"))).toList())
+            .key(row -> new Gizmo((String) row.get("id"), null))
             .build();
 
         var registry = net.teppan.shazo.jdbc.Repositories.builder()

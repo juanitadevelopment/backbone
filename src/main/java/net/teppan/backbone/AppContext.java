@@ -135,7 +135,38 @@ public final class AppContext {
     }
 
     /**
-     * Lists entities of the given type within this transaction.
+     * Finds the unique entity of the given type within this transaction, throwing
+     * if absent or ambiguous.
+     *
+     * @param type  the entity type; never {@code null}
+     * @param query a query entity carrying the key; never {@code null}
+     * @param <T>   the entity type
+     * @return the single matching entity
+     * @throws IllegalStateException if no describer registry is configured
+     * @throws ShazoException        if absent, ambiguous, or the read fails
+     */
+    public <T> T find(Class<T> type, T query) throws ShazoException {
+        return requireDescribers().in(unitOfWork).find(type, query);
+    }
+
+    /**
+     * Fetches all rows of the given type as a raw table within this transaction,
+     * without mapping to domain objects — for tabular consumers (UI grids,
+     * reports, exports).
+     *
+     * @param type  the entity type; never {@code null}
+     * @param query a query entity; never {@code null}
+     * @param <T>   the entity type
+     * @return the matching rows in table form
+     * @throws IllegalStateException if no describer registry is configured
+     * @throws ShazoException        if the read fails
+     */
+    public <T> net.teppan.shazo.RawResult catalog(Class<T> type, T query) throws ShazoException {
+        return requireDescribers().in(unitOfWork).catalog(type, query);
+    }
+
+    /**
+     * Gathers all entities of the given type into a list within this transaction.
      *
      * @param type  the entity type; never {@code null}
      * @param query a query entity; never {@code null}
@@ -144,8 +175,8 @@ public final class AppContext {
      * @throws IllegalStateException if no describer registry is configured
      * @throws ShazoException        if the read fails
      */
-    public <T> List<T> catalog(Class<T> type, T query) throws ShazoException {
-        return requireDescribers().in(unitOfWork).catalog(type, query);
+    public <T> List<T> gather(Class<T> type, T query) throws ShazoException {
+        return requireDescribers().in(unitOfWork).gather(type, query);
     }
 
     private net.teppan.shazo.jdbc.Repositories requireDescribers() {

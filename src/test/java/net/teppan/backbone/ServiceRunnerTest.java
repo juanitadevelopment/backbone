@@ -43,10 +43,9 @@ class ServiceRunnerTest {
             .delete(i   -> List.of(SqlCommand.of("DELETE FROM item WHERE id = ?", i.id())))
             .retrieve(i -> List.of(SqlCommand.of("SELECT id, name FROM item WHERE id = ?", i.id())))
             .catalog(i  -> List.of(SqlCommand.of("SELECT id, name FROM item")))
-            .infuser(r  -> r.first().map(row -> new Item(
+            .infuser(r  -> r.primary().first().map(row -> new Item(
                 (String) row.get("id"), (String) row.get("name"))).orElseThrow())
-            .cataloger(r -> r.rows().stream().map(row -> new Item(
-                (String) row.get("id"), (String) row.get("name"))).toList())
+            .key(row -> new Item((String) row.get("id"), null))
             .build();
         repos = Repositories.builder().register(Item.class, items).build();
     }
