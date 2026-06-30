@@ -113,6 +113,61 @@ class ServiceRunnerTest {
     }
 
     @Test
+    void outboxManagement_emptyWithoutOutbox() {
+        var runner = ServiceRunner.builder().dataSource(ds).build();
+        assertThat(runner.deadLetterCount()).isEmpty();
+        assertThat(runner.pendingEvents(10)).isEmpty();
+        assertThat(runner.deadLetterEvents(10)).isEmpty();
+        assertThat(runner.retryEvent(1)).isFalse();
+        assertThat(runner.discardEvent(1)).isFalse();
+    }
+
+    @Test
+    void deadLetterThenRetry_throughRunner() throws Exception {
+        var down = new java.util.concurrent.atomic.AtomicBoolean(true);
+        var delivered = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        try (var runner = ServiceRunner.builder().dataSource(ds)
+                .durableEvents(ItemCreated.class)
+                .outboxMaxAttempts(2)
+                .outboxPollInterval(java.time.Duration.ofMillis(30))
+                .subscribe(ItemCreated.class, e -> {
+                    if (down.get()) throw new RuntimeException("subscriber down");
+                    delivered.add(e.id());
+                })
+                .register("create", ctx -> {
+                    ctx.repository(items).store(new Item("x1", "X"));
+                    ctx.publish(new ItemCreated("x1"));
+                    return null;
+                })
+                .build()) {
+
+            runner.execute("create", Principal.system());
+
+            // The subscriber keeps failing, so the event is dead-lettered.
+            awaitUntil(() -> runner.deadLetterCount().orElse(0) >= 1);
+            assertThat(runner.pendingEventCount().getAsLong()).isZero();
+            var dead = runner.deadLetterEvents(10);
+            assertThat(dead).hasSize(1);
+            assertThat(dead.get(0).type()).isEqualTo(ItemCreated.class.getName());
+
+            // Fix the subscriber and requeue: it is now delivered.
+            down.set(false);
+            assertThat(runner.retryEvent(dead.get(0).id())).isTrue();
+            awaitUntil(() -> !delivered.isEmpty());
+            assertThat(delivered).containsExactly("x1");
+            assertThat(runner.deadLetterCount().getAsLong()).isZero();
+        }
+    }
+
+    private static void awaitUntil(java.util.function.BooleanSupplier cond) throws Exception {
+        long deadline = System.currentTimeMillis() + 3000;
+        while (!cond.getAsBoolean() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
+        assertThat(cond.getAsBoolean()).isTrue();
+    }
+
+    @Test
     void run_adHocService_executesWithContext() throws AppServiceException {
         var runner = ServiceRunner.builder().dataSource(ds).build();
         var result = runner.run(ctx -> ctx.principal().id(), Principal.system());

@@ -1,6 +1,7 @@
 package net.teppan.backbone;
 
 import net.teppan.backbone.event.Outbox;
+import net.teppan.backbone.event.OutboxEntry;
 import net.teppan.shazo.ShazoException;
 import net.teppan.shazo.jdbc.Transactor;
 import org.slf4j.Logger;
@@ -78,7 +79,7 @@ public final class ServiceRunner implements AutoCloseable {
                           Map<String, AppService<?>> services,
                           List<Subscription<?>> subscriptions,
                           DataSource outboxDataSource, List<Class<?>> outboxTypes,
-                          Duration pollInterval, Duration retention) {
+                          Duration pollInterval, Duration retention, int maxAttempts) {
         this.router        = router;
         this.defaultLocale = defaultLocale;
         this.services      = Map.copyOf(services);
@@ -90,7 +91,7 @@ public final class ServiceRunner implements AutoCloseable {
                 throw new IllegalStateException("durableEvents requires a dataSource(...)");
             }
             this.outbox = new Outbox(outboxDataSource, this::deliver,
-                outboxTypes, pollInterval, retention);
+                outboxTypes, pollInterval, retention, maxAttempts);
         }
     }
 
@@ -281,6 +282,65 @@ public final class ServiceRunner implements AutoCloseable {
             : java.util.OptionalLong.of(outbox.pendingCount());
     }
 
+    /**
+     * Returns the number of dead-lettered durable events — those that exhausted
+     * their delivery attempts or could not be decoded — when durable events are
+     * enabled.
+     *
+     * @return the dead-letter count, or empty if events are delivered in-process
+     */
+    public java.util.OptionalLong deadLetterCount() {
+        return outbox == null
+            ? java.util.OptionalLong.empty()
+            : java.util.OptionalLong.of(outbox.deadLetterCount());
+    }
+
+    /**
+     * Returns up to {@code limit} durable events still awaiting delivery, oldest
+     * first, for inspection. Empty when durable events are not enabled.
+     *
+     * @param limit the maximum number of entries; must be &ge; 0
+     * @return the pending entries (metadata only)
+     */
+    public List<OutboxEntry> pendingEvents(int limit) {
+        return outbox == null ? List.of() : outbox.peekPending(limit);
+    }
+
+    /**
+     * Returns up to {@code limit} dead-lettered durable events, oldest first, for
+     * triage. Empty when durable events are not enabled.
+     *
+     * @param limit the maximum number of entries; must be &ge; 0
+     * @return the dead-lettered entries (metadata only)
+     */
+    public List<OutboxEntry> deadLetterEvents(int limit) {
+        return outbox == null ? List.of() : outbox.peekDeadLetters(limit);
+    }
+
+    /**
+     * Requeues a dead-lettered durable event for delivery, resetting its attempt
+     * count. Use after fixing whatever caused delivery to fail.
+     *
+     * @param id the outbox row id (from {@link #deadLetterEvents(int)})
+     * @return {@code true} if a dead-lettered event was requeued; {@code false}
+     *         if none matched or durable events are not enabled
+     */
+    public boolean retryEvent(long id) {
+        return outbox != null && outbox.retry(id);
+    }
+
+    /**
+     * Permanently discards a durable event, whatever its status. Intended for
+     * dead-lettered events that should not be delivered.
+     *
+     * @param id the outbox row id (from {@link #deadLetterEvents(int)})
+     * @return {@code true} if an event was discarded; {@code false} if none
+     *         matched or durable events are not enabled
+     */
+    public boolean discardEvent(long id) {
+        return outbox != null && outbox.discard(id);
+    }
+
     // ── Internals ─────────────────────────────────────────────────────────────
 
     private Transactor transactorFor(String tenant) {
@@ -364,6 +424,7 @@ public final class ServiceRunner implements AutoCloseable {
         private final List<Class<?>> outboxTypes = new ArrayList<>();
         private Duration outboxPollInterval = Duration.ofMillis(200);
         private Duration outboxRetention = Duration.ofDays(7);
+        private int outboxMaxAttempts = Outbox.DEFAULT_MAX_ATTEMPTS;
 
         private Builder() {}
 
@@ -474,6 +535,22 @@ public final class ServiceRunner implements AutoCloseable {
         }
 
         /**
+         * Sets how many times the outbox attempts to deliver an event before
+         * moving it to the dead-letter state (default
+         * {@value net.teppan.backbone.event.Outbox#DEFAULT_MAX_ATTEMPTS}).
+         *
+         * @param maxAttempts the attempt limit; must be &ge; 1
+         * @return this builder
+         */
+        public Builder outboxMaxAttempts(int maxAttempts) {
+            if (maxAttempts < 1) {
+                throw new IllegalArgumentException("maxAttempts must be >= 1: " + maxAttempts);
+            }
+            this.outboxMaxAttempts = maxAttempts;
+            return this;
+        }
+
+        /**
          * Builds the {@link ServiceRunner}.
          *
          * @return a new runner
@@ -485,7 +562,8 @@ public final class ServiceRunner implements AutoCloseable {
                 throw new IllegalStateException("a dataSource or tenantRouter must be set");
             }
             return new ServiceRunner(router, defaultLocale, services, subscriptions,
-                singleDataSource, outboxTypes, outboxPollInterval, outboxRetention);
+                singleDataSource, outboxTypes, outboxPollInterval, outboxRetention,
+                outboxMaxAttempts);
         }
     }
 }

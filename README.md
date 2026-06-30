@@ -9,7 +9,7 @@ work per request, composable services, domain events delivered *after* commit,
 scheduled jobs, and basic runtime introspection — without a heavyweight
 container, dynamic proxies, or XML.
 
-> **Status:** early release (`0.1.1`). API may still change before `1.0.0`.
+> **Status:** early release (`0.1.2`). API may still change before `1.0.0`.
 
 ## Requirements
 
@@ -65,6 +65,26 @@ committed change without its event, nor an event without its change. Subscribers
 must be idempotent. (Without `durableEvents`, events are delivered in-process,
 synchronously, right after commit.)
 
+### Dead-letters and triage
+
+An event that keeps failing is not retried forever. After
+`outboxMaxAttempts(...)` failed deliveries (default `10`) it moves to a terminal
+**dead-letter** state and the poller skips it; an event whose payload cannot be
+decoded is dead-lettered immediately. Dead-lettered events can be inspected and,
+once the cause is fixed, requeued or discarded:
+
+```java
+runner.deadLetterCount();              // OptionalLong
+for (OutboxEntry e : runner.deadLetterEvents(50)) {
+    log.warn("stuck event {} ({}) after {} attempts: {}",
+        e.id(), e.type(), e.attempts(), e.lastError().orElse(""));
+}
+runner.retryEvent(id);                 // requeue (resets the attempt count)
+runner.discardEvent(id);              // drop permanently
+```
+
+`pendingEvents(int)` lists events still awaiting delivery the same way.
+
 ## Scheduling
 
 ```java
@@ -97,7 +117,7 @@ Backbone is itself published via JitPack:
 
 ```kotlin
 repositories { maven { url = uri("https://jitpack.io") } }
-dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.1") }
+dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.2") }
 ```
 
 JitPack builds shazo transitively, so a single dependency is enough.
