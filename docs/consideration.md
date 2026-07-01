@@ -48,24 +48,25 @@
 - **方向性**: `catalog` のソートを backend に持たせる（例: `FileCommand.List` に Comparator）。
   あるいは「順序保証は catalog クエリ次第」と契約として明文化。
 
-### 1.3 HTTP トランスポートが Repository 契約を完全に満たしていない 🔴
+### 1.3 HTTP トランスポートが Repository 契約を完全に満たしていない ✅（shazo 0.1.7 で解決）
 - **原則**: sharaku は「ストレージだけでなく**トランスポートも置換可能**」を志向した
   （RMI / HTTP の存在理由）。契約メソッドが特定トランスポートで動かないのは抽象の破綻＝不可。
-- **現状（精査）**:
+- **旧状態（精査）**:
   - `contains` / `store` / `delete` / `retrieve` / `gather` … ✅ HTTP 越しで動作。
-    （`gather` は `OP_CATALOG` → サーバの `gather` → エンコード済みオブジェクト列）。
   - `find` … ⚠️ **不完全**。アダプタが**クライアント側で `retrieve().orElseThrow(NotFound)`** に
     化けており、サーバの `find` を呼ばない＝ **MultipleFound を検査しない**。
   - `catalog`（RawResult） … ❌ **未対応**（`UnsupportedOperationException`）。
-- **直し方（プロトコル拡張。例外搬送 `STATUS_EXCEPTION` は既存）**:
-  1. **OP_FIND**: サーバで `find()` を実行し、T か NotFound / MultipleFound を返す。
-     アダプタはサーバ find に委譲（クライアント偽装を廃止）。
-  2. **OP_CATALOG（生の表）**: `catalog()` → RawResult を**型付き行フォーマット**で転送
-     （列名＋セルの型タグ＋値）。**Java シリアライズの全 Object 許可は避け**、スカラ型
-     （String / 数値 / Boolean / 日時 / byte[] 等）限定の安全なエンコードにする（gadget chain 回避）。
-  3. 現 `OP_CATALOG`（中身は gather）を **OP_GATHER** に改名し、生 catalog 用に OP_CATALOG を分離。
+- **実装済み（shazo 0.1.7）**:
+  1. ✅ **OP_FIND**: サーバで `find()` を実行し、T / NotFound / MultipleFound を返す
+     （`STATUS_MULTIPLE_FOUND` 追加）。アダプタはサーバ find に委譲（クライアント偽装を廃止）。
+  2. ✅ **OP_CATALOG（生の表）**: `catalog()` → RawResult を**型付き行フォーマット**（`RowCodec`）で転送。
+     列名＋セルの型タグ＋値。スカラ型（String / 数値 / Boolean / BigDecimal / byte[] / SQL 日時）
+     限定の安全エンコードで、**任意 Object の逆シリアライズをしない**（gadget chain 回避）。非対応型は
+     `toString` に退避。
+  3. ✅ 現 `OP_CATALOG`（中身は gather）を **OP_GATHER** に改名し、生 catalog 用に OP_CATALOG を分離。
+  - E2E テスト（JDK 内蔵 HttpServer 経由）: find の一意/NotFound/MultipleFound、catalog の型付き行往復。
 - **補足**: 「現代なら REST でも」はトランスポート実装の選択肢の話。まず契約の透過性
-  （全メソッドが動く）を満たすのが先。
+  （全メソッドが動く）を満たすのが先—これは達成済み。
 
 ### 1.4 bare `retrieve` の接続一貫性 🟡
 - **現状**: `executeEach` の既定は**コマンドごとに `execute` を呼ぶ**。UoW 内では同一接続だが、
