@@ -115,13 +115,16 @@
   - ✅ `ServiceRunner.forTenant(...)` / `withTenant(...)`、`ctx.tenant()`。
   - ✅ **テナントごとの Outbox**: publish はテナントの接続へ書き、テナントの DataSource
     （自前 `backbone_outbox`）で poll。遅延生成。`TenantRunner` に per-tenant カウント。
-  - ✅ E2E テスト（schema-per-tenant on H2: データ分離 / ambient / テナント別 durable 配信）。
+  - ✅ **TimerJob のテナント実行**（backbone 0.1.10）: `TimerScheduler.tenantRouter(...)`、
+    テナント束縛ジョブ（`schedule(name, cron/interval, tenant, job)`）＋全テナント fan-out
+    （`scheduleForEachTenant(...)`、発火時にテナント集合を評価）。
+  - ✅ E2E テスト（schema-per-tenant on H2: データ分離 / ambient / テナント別 durable 配信 /
+    テナント別タイマー / fan-out）。
 - **残るフォローアップ**:
-  1. **TimerJob のテナント実行**: `TimerScheduler` はまだ単一 DataSource。テナント文脈付き
-     実行（指定テナント／全テナント fan-out）。
-  2. `TenantRunner` の管理メソッド拡充（retry/discard/一覧。今は count のみ。runner レベルは
+  1. `TenantRunner` の管理メソッド拡充（retry/discard/一覧。今は count のみ。runner レベルは
      default テナント）。
-  3. テナント文脈の `AppContext` → タイマーへの伝播の一級市民化。
+  2. Timer 内部 runner に describer レジストリを渡す（現状ジョブは `ctx.connection()` の生 SQL、
+     または要 registry）。
 
 ### 2.2 認可（Authorization）フックがない 🔴
 - **現状**: `ServiceRunner` は `Principal` を運ぶが、**ロール / 権限の検査機構がない**。
