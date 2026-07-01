@@ -2,6 +2,7 @@ package net.teppan.backbone;
 
 import net.teppan.shazo.Describer;
 import net.teppan.shazo.jdbc.Repositories;
+import net.teppan.backbone.timer.TimerScheduler;
 import net.teppan.shazo.jdbc.SessionInitDataSource;
 import net.teppan.shazo.jdbc.SqlCommand;
 import net.teppan.shazo.jdbc.embedded.EmbeddedDataSource;
@@ -13,6 +14,7 @@ import java.io.Serializable;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -28,12 +30,13 @@ class MultiTenantTest {
     record Item(String id, String name) {}
     record ItemAdded(String id) implements Serializable {}
 
+    private DataSource shared;
     private Function<String, DataSource> router;
     private Repositories repos;
 
     @BeforeEach
     void setUp() throws Exception {
-        var shared = EmbeddedDataSource.inMemory("mt_" + System.nanoTime());
+        shared = EmbeddedDataSource.inMemory("mt_" + System.nanoTime());
         try (var conn = shared.getConnection(); var st = conn.createStatement()) {
             for (var t : List.of("acme", "globex")) {
                 st.execute("CREATE SCHEMA IF NOT EXISTS " + t);
@@ -114,6 +117,53 @@ class MultiTenantTest {
             awaitUntil(() -> delivered.contains("a") && delivered.contains("g"));
             assertThat(runner.forTenant("acme").pendingEventCount()).isPresent();
             assertThat(runner.forTenant("globex").pendingEventCount()).isPresent();
+        }
+    }
+
+    @Test
+    void timer_runsInASingleTenantContext() throws Exception {
+        try (var scheduler = TimerScheduler.builder().tenantRouter(router).build()) {
+            var ran = new java.util.concurrent.CountDownLatch(1);
+            scheduler.schedule("acme-tick", Duration.ofMillis(30), "acme", ctx -> {
+                try (var ps = ctx.connection().prepareStatement(
+                        "MERGE INTO item (id, name) KEY (id) VALUES ('t', 'Timer-Acme')")) {
+                    ps.executeUpdate();
+                }
+                ran.countDown();
+            });
+            assertThat(ran.await(3, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            scheduler.cancel("acme-tick");
+        }
+        // Written to acme's schema only.
+        assertThat(itemName("acme", "t")).isEqualTo("Timer-Acme");
+        assertThat(itemName("globex", "t")).isNull();
+    }
+
+    @Test
+    void timer_fansOutAcrossTenants() throws Exception {
+        var ranFor = new CopyOnWriteArraySet<String>();
+        try (var scheduler = TimerScheduler.builder().tenantRouter(router).build()) {
+            scheduler.scheduleForEachTenant("all-tick", Duration.ofMillis(30),
+                () -> List.of("acme", "globex"),
+                ctx -> {
+                    try (var ps = ctx.connection().prepareStatement(
+                            "MERGE INTO item (id, name) KEY (id) VALUES ('fan', 'Fanned')")) {
+                        ps.executeUpdate();
+                    }
+                    ranFor.add(ctx.tenant().orElse("?"));
+                });
+            awaitUntil(() -> ranFor.contains("acme") && ranFor.contains("globex"));
+            scheduler.cancel("all-tick");
+        }
+        assertThat(itemName("acme", "fan")).isEqualTo("Fanned");
+        assertThat(itemName("globex", "fan")).isEqualTo("Fanned");
+    }
+
+    /** Reads item.name from a specific schema directly, or null if absent. */
+    private String itemName(String schema, String id) throws Exception {
+        try (var conn = shared.getConnection(); var st = conn.createStatement();
+             var rs = st.executeQuery("SELECT name FROM " + schema + ".item WHERE id = '" + id + "'")) {
+            return rs.next() ? rs.getString(1) : null;
         }
     }
 

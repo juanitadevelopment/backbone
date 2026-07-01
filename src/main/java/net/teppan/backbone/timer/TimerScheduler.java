@@ -11,9 +11,13 @@ import javax.sql.DataSource;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZonedDateTime;
+import java.util.Collection;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -76,8 +80,8 @@ public final class TimerScheduler implements AutoCloseable {
     private final ScheduledExecutorService executor;
     private final Map<String, JobEntry> jobs = new ConcurrentHashMap<>();
 
-    private TimerScheduler(DataSource dataSource, Locale locale, int poolSize) {
-        this.runner   = ServiceRunner.builder().dataSource(dataSource).defaultLocale(locale).build();
+    private TimerScheduler(Function<String, DataSource> router, Locale locale, int poolSize) {
+        this.runner   = ServiceRunner.builder().tenantRouter(router).defaultLocale(locale).build();
         this.locale   = locale;
         // A pool larger than one so a long-running job does not starve the others.
         this.executor = Executors.newScheduledThreadPool(
@@ -106,15 +110,21 @@ public final class TimerScheduler implements AutoCloseable {
      * @throws IllegalArgumentException if {@code name} is already registered
      */
     public void schedule(String name, Duration interval, TimerJob job) {
-        Objects.requireNonNull(name,     "name");
-        Objects.requireNonNull(interval, "interval");
-        Objects.requireNonNull(job,      "job");
-        checkNotRegistered(name);
+        scheduleInterval(name, interval, null, job);
+    }
 
-        long millis = interval.toMillis();
-        Future<?> future = executor.scheduleAtFixedRate(
-            () -> runJob(name, job), millis, millis, TimeUnit.MILLISECONDS);
-        jobs.put(name, new JobEntry(job, null, interval, null, future, JobStatus.RUNNING));
+    /**
+     * Schedules an interval job that runs in {@code tenant}'s context each tick.
+     *
+     * @param name     a unique job name; never {@code null}
+     * @param interval the period between executions; never {@code null}
+     * @param tenant   the tenant to run as; never {@code null}
+     * @param job      the task to run; never {@code null}
+     * @throws IllegalArgumentException if {@code name} is already registered
+     */
+    public void schedule(String name, Duration interval, String tenant, TimerJob job) {
+        Objects.requireNonNull(tenant, "tenant");
+        scheduleInterval(name, interval, () -> List.of(tenant), job);
     }
 
     /**
@@ -128,14 +138,78 @@ public final class TimerScheduler implements AutoCloseable {
      *                                  the cron expression is malformed
      */
     public void schedule(String name, String cronExpression, TimerJob job) {
+        scheduleCron(name, cronExpression, null, job);
+    }
+
+    /**
+     * Schedules a cron job that runs in {@code tenant}'s context each fire.
+     *
+     * @param name           a unique job name; never {@code null}
+     * @param cronExpression the 6-field cron expression; never {@code null}
+     * @param tenant         the tenant to run as; never {@code null}
+     * @param job            the task to run; never {@code null}
+     * @throws IllegalArgumentException if {@code name} is already registered or the
+     *                                  cron expression is malformed
+     */
+    public void schedule(String name, String cronExpression, String tenant, TimerJob job) {
+        Objects.requireNonNull(tenant, "tenant");
+        scheduleCron(name, cronExpression, () -> List.of(tenant), job);
+    }
+
+    /**
+     * Schedules a cron job that, on each fire, runs once <em>per tenant</em>
+     * supplied by {@code tenants} (evaluated at fire time, so tenants added later
+     * are picked up).
+     *
+     * @param name           a unique job name; never {@code null}
+     * @param cronExpression the 6-field cron expression; never {@code null}
+     * @param tenants        supplies the tenants to fan out to; never {@code null}
+     * @param job            the task to run; never {@code null}
+     * @throws IllegalArgumentException if {@code name} is already registered or the
+     *                                  cron expression is malformed
+     */
+    public void scheduleForEachTenant(String name, String cronExpression,
+            Supplier<? extends Collection<String>> tenants, TimerJob job) {
+        Objects.requireNonNull(tenants, "tenants");
+        scheduleCron(name, cronExpression, tenants, job);
+    }
+
+    /**
+     * Interval variant of
+     * {@link #scheduleForEachTenant(String, String, Supplier, TimerJob)}.
+     *
+     * @param name     a unique job name; never {@code null}
+     * @param interval the period between executions; never {@code null}
+     * @param tenants  supplies the tenants to fan out to; never {@code null}
+     * @param job      the task to run; never {@code null}
+     * @throws IllegalArgumentException if {@code name} is already registered
+     */
+    public void scheduleForEachTenant(String name, Duration interval,
+            Supplier<? extends Collection<String>> tenants, TimerJob job) {
+        Objects.requireNonNull(tenants, "tenants");
+        scheduleInterval(name, interval, tenants, job);
+    }
+
+    private void scheduleInterval(String name, Duration interval,
+            Supplier<? extends Collection<String>> tenants, TimerJob job) {
+        Objects.requireNonNull(name,     "name");
+        Objects.requireNonNull(interval, "interval");
+        Objects.requireNonNull(job,      "job");
+        checkNotRegistered(name);
+        long millis = interval.toMillis();
+        Future<?> future = executor.scheduleAtFixedRate(
+            () -> runJob(name, job), millis, millis, TimeUnit.MILLISECONDS);
+        jobs.put(name, new JobEntry(job, null, interval, null, tenants, future, JobStatus.RUNNING));
+    }
+
+    private void scheduleCron(String name, String cronExpression,
+            Supplier<? extends Collection<String>> tenants, TimerJob job) {
         Objects.requireNonNull(name,           "name");
         Objects.requireNonNull(cronExpression, "cronExpression");
         Objects.requireNonNull(job,            "job");
         checkNotRegistered(name);
-
         CronExpression cron = CronExpression.parse(cronExpression);
-        JobEntry entry = new JobEntry(job, cron, null, null, null, JobStatus.RUNNING);
-        jobs.put(name, entry);
+        jobs.put(name, new JobEntry(job, cron, null, null, tenants, null, JobStatus.RUNNING));
         scheduleCronRun(name, cron, job);
     }
 
@@ -164,7 +238,7 @@ public final class TimerScheduler implements AutoCloseable {
         Objects.requireNonNull(job,  "job");
         checkNotRegistered(name);
 
-        jobs.put(name, new JobEntry(job, null, null, when, null, JobStatus.RUNNING));
+        jobs.put(name, new JobEntry(job, null, null, when, null, null, JobStatus.RUNNING));
         scheduleOneShotRun(name, when, job);
     }
 
@@ -262,12 +336,29 @@ public final class TimerScheduler implements AutoCloseable {
     private void runJob(String name, TimerJob job) {
         JobEntry entry = jobs.get(name);
         if (entry == null || entry.status() != JobStatus.RUNNING) return;
+        // Each run is a system-principal unit of work: the job's repository
+        // operations commit atomically and its published events fire after. A
+        // tenant-scoped job runs once per tenant; a plain job runs once.
+        var tenants = entry.tenants();
+        if (tenants == null) {
+            runOne(name, job, null);
+        } else {
+            for (String tenant : tenants.get()) {
+                runOne(name, job, tenant);
+            }
+        }
+    }
+
+    private void runOne(String name, TimerJob job, String tenant) {
         try {
-            // Each run is a system-principal unit of work: the job's repository
-            // operations commit atomically and its published events fire after.
-            runner.run(ctx -> { job.run(ctx); return null; }, Principal.system(), locale);
+            if (tenant == null) {
+                runner.run(ctx -> { job.run(ctx); return null; }, Principal.system(), locale);
+            } else {
+                runner.forTenant(tenant).run(ctx -> { job.run(ctx); return null; }, Principal.system());
+            }
         } catch (AppServiceException e) {
-            log.error("Timer job '{}' threw", name, e);
+            log.error("Timer job '{}'{} threw", name,
+                tenant == null ? "" : " (tenant " + tenant + ")", e);
         }
     }
 
@@ -323,15 +414,16 @@ public final class TimerScheduler implements AutoCloseable {
             CronExpression cron,     // null unless a cron job
             Duration interval,       // null unless an interval job
             Instant fireAt,          // null unless a one-shot job
+            Supplier<? extends Collection<String>> tenants,  // null = run once with no tenant
             Future<?> future,
             JobStatus status) {
 
         JobEntry withStatus(JobStatus s) {
-            return new JobEntry(job, cron, interval, fireAt, future, s);
+            return new JobEntry(job, cron, interval, fireAt, tenants, future, s);
         }
 
         JobEntry withFuture(Future<?> f) {
-            return new JobEntry(job, cron, interval, fireAt, f, status);
+            return new JobEntry(job, cron, interval, fireAt, tenants, f, status);
         }
     }
 
@@ -342,7 +434,7 @@ public final class TimerScheduler implements AutoCloseable {
      */
     public static final class Builder {
 
-        private DataSource dataSource;
+        private Function<String, DataSource> router;
         private Locale locale = Locale.getDefault();
         private int poolSize = DEFAULT_POOL_SIZE;
 
@@ -364,13 +456,28 @@ public final class TimerScheduler implements AutoCloseable {
         }
 
         /**
-         * Sets the data source used when creating {@link AppContext} for job runs.
+         * Sets the data source used when creating {@link AppContext} for job runs
+         * (single-tenant).
          *
          * @param dataSource the JDBC data source; never {@code null}
          * @return this builder
          */
         public Builder dataSource(DataSource dataSource) {
-            this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+            Objects.requireNonNull(dataSource, "dataSource");
+            this.router = tenant -> dataSource;
+            return this;
+        }
+
+        /**
+         * Sets per-tenant data-source routing, enabling tenant-bound and
+         * fan-out jobs (see {@link #schedule(String, String, String, TimerJob)}
+         * and {@link #scheduleForEachTenant}).
+         *
+         * @param tenantRouter maps a tenant id to its data source; never {@code null}
+         * @return this builder
+         */
+        public Builder tenantRouter(Function<String, DataSource> tenantRouter) {
+            this.router = Objects.requireNonNull(tenantRouter, "tenantRouter");
             return this;
         }
 
@@ -392,10 +499,10 @@ public final class TimerScheduler implements AutoCloseable {
          * @throws IllegalStateException if no data source was provided
          */
         public TimerScheduler build() {
-            if (dataSource == null) {
-                throw new IllegalStateException("dataSource must be set");
+            if (router == null) {
+                throw new IllegalStateException("a dataSource or tenantRouter must be set");
             }
-            return new TimerScheduler(dataSource, locale, poolSize);
+            return new TimerScheduler(router, locale, poolSize);
         }
     }
 }

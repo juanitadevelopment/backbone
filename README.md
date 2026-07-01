@@ -9,7 +9,7 @@ work per request, composable services, domain events delivered *after* commit,
 scheduled jobs, and basic runtime introspection — without a heavyweight
 container, dynamic proxies, or XML.
 
-> **Status:** early release (`0.1.9`). API may still change before `1.0.0`.
+> **Status:** early release (`0.1.10`). API may still change before `1.0.0`.
 
 ## Requirements
 
@@ -176,6 +176,24 @@ Each job runs as a `Principal.system()` unit of work; jobs can be
 live in memory only — for deadlines that must survive a restart, persist them and
 rearm on startup.
 
+### Tenant-scoped and fan-out jobs
+
+A scheduler built with `tenantRouter(...)` can bind a job to one tenant, or fan a
+single schedule out across many — each firing runs as its own tenant-scoped unit
+of work (its `ctx` routes to that tenant's data source):
+
+```java
+try (var scheduler = TimerScheduler.builder().tenantRouter(router).build()) {
+    // one tenant
+    scheduler.schedule("acme-nightly", "0 0 2 * * *", "acme", ctx -> cleanup(ctx));
+
+    // every tenant, re-resolved at each firing (add a tenant, it's picked up)
+    scheduler.scheduleForEachTenant("nightly", Duration.ofHours(24),
+        () -> tenantRegistry.activeTenants(),
+        ctx -> cleanup(ctx));   // ctx.tenant() reports which tenant this run is for
+}
+```
+
 ## Operations console
 
 A backbone is assembled from independent parts; `BackboneConsole` binds them into
@@ -223,7 +241,7 @@ Backbone is itself published via JitPack:
 
 ```kotlin
 repositories { maven { url = uri("https://jitpack.io") } }
-dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.9") }
+dependencies { implementation("com.github.juanitadevelopment:backbone:v0.1.10") }
 ```
 
 JitPack builds shazo transitively, so a single dependency is enough.

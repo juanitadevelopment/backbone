@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "net.teppan"
-version = "0.1.9"
+version = "0.1.10"
 
 java {
     toolchain {
@@ -44,15 +44,15 @@ tasks.withType<JavaCompile> {
 }
 
 tasks.javadoc {
-    title = "Backbone 0.1.9 API"
+    title = "Backbone 0.1.10 API"
     (options as StandardJavadocDocletOptions).apply {
         encoding = "UTF-8"
         charSet = "UTF-8"
         locale = "en"
         addStringOption("Xdoclint:all", "-quiet")
         addBooleanOption("html5", true)
-        windowTitle = "Backbone 0.1.9 API"
-        header = "<b>Backbone 0.1.9</b>"
+        windowTitle = "Backbone 0.1.10 API"
+        header = "<b>Backbone 0.1.10</b>"
         bottom = "Copyright &#169; 2026 net.teppan. All rights reserved."
     }
 }
