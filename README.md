@@ -1,5 +1,11 @@
 # Backbone
 
+> [!IMPORTANT]
+> **Moved.** backbone now lives in the **[`sharaku`](https://github.com/juanitadevelopment/sharaku)**
+> monorepo (alongside `shazo`) and is released from there. This repository is
+> archived. Update your dependency coordinate to:
+> `com.github.juanitadevelopment.sharaku:backbone:0.2.0`
+
 A minimal **transactional service and domain-event runtime** for Java, built on
 the [shazo](https://github.com/juanitadevelopment/shazo) persistence abstraction.
 
